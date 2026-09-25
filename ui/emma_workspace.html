@@ -192,6 +192,8 @@ table.t .mono{font-family:var(--mono);font-size:11.5px}
 .brief .stamp{color:var(--text-3);font-size:11px;font-weight:500}
 .brief ul{margin:10px 0 0 24px;padding:0;font-size:13px;color:var(--text-2);line-height:1.7}
 .brief ul li b{color:var(--text)}
+.brief ul li.clickable{cursor:pointer;border-radius:4px;transition:background-color .12s}
+.brief ul li.clickable:hover{background-color:var(--purple-mid);text-decoration:underline;text-decoration-color:var(--purple)}
 
 /* Team of agents */
 .agents-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
@@ -4604,6 +4606,11 @@ const CLIENT_PROFILES = {
 
 let currentMode = 'direct';
 let currentClient = 'rally';
+// Real reminders actually sent this session (Run reminder cycle) -- not
+// persisted, just so the Morning brief can mention it happened without a
+// page reload. Cleared on refresh, same lifetime as every other
+// client-side-only real-data array in this file.
+let SENT_REMINDERS_THIS_SESSION = [];
 
 function applyClient(){
   const p = CLIENT_PROFILES[currentClient];
@@ -4717,6 +4724,70 @@ function applyRealOverviewAttentionKpi(){
   if(failed) metaParts.push(failed + ' failed extraction' + (failed===1?'':'s'));
   const metaEl = document.getElementById('kpiDecisionsMeta');
   if(metaEl) metaEl.textContent = metaParts.length ? metaParts.join(' · ') : 'Nothing needs your attention right now';
+}
+
+// Morning brief, made real and interactive: composes real bullet points
+// from whatever real data has loaded so far (DEALS, COLLECTIONS,
+// DEAL_RECON, SENT_REMINDERS_THIS_SESSION) instead of CLIENT_PROFILES'
+// fixed strings, and each bullet is clickable -- goToTab() to the real
+// screen that data came from, same navigation function the sidebar
+// itself uses. Called from loadRealDeals()/loadRealCollections()/
+// loadRealDealReconciliation()/runReminderCycle(), since any of those
+// finishing (or a real send happening) changes what the brief should say.
+function applyRealMorningBrief(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  const realCollections = COLLECTIONS.filter(c=>c.real);
+  const invoiced = (DEAL_RECON || []).filter(d=>d.status!=='not_invoiced');
+  if(!realDeals.length && !realCollections.length && !invoiced.length && !SENT_REMINDERS_THIS_SESSION.length) return;
+
+  const awaiting = realDeals.filter(d=>dealReviewStatus(d).key==='awaiting');
+  const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed');
+  const overdue = realCollections.filter(c=>(Number(c.dpd)||0) > 0).sort((a,b)=>(b.dpd||0)-(a.dpd||0));
+  const unpaid = invoiced.filter(d=>d.status==='unpaid');
+  const partial = invoiced.filter(d=>d.status==='partial');
+  const paid = invoiced.filter(d=>d.status==='paid');
+
+  const bullets = [];
+  if(awaiting.length){
+    bullets.push({tab:'pipeline', html:'<b>' + awaiting.length + ' real deal' + (awaiting.length===1?'':'s') + '</b> awaiting your review: ' + awaiting.map(d=>esc(d.c)).join(', ') + '.'});
+  }
+  if(failed.length){
+    bullets.push({tab:'pipeline', html:'<b>' + failed.length + ' real deal' + (failed.length===1?'':'s') + '</b> failed contract extraction and need' + (failed.length===1?'s':'') + ' a look.'});
+  }
+  if(overdue.length){
+    const worst = overdue[0];
+    bullets.push({tab:'collections', html:'<b>' + overdue.length + ' real invoice' + (overdue.length===1?'':'s') + '</b> currently overdue — ' + esc(worst.c) + ' is the furthest, ' + worst.dpd + ' days.'});
+  }
+  if(unpaid.length){
+    const total = unpaid.reduce((s,d)=>s+(Number(d.qboBalance)||0),0);
+    bullets.push({tab:'cash', html:'<b>' + unpaid.length + ' real deal' + (unpaid.length===1?'':'s') + '</b> fully unpaid in QuickBooks (' + money(total) + '): ' + unpaid.map(d=>esc(d.c)).join(', ') + '.'});
+  }
+  if(partial.length){
+    const outstanding = partial.reduce((s,d)=>s+(Number(d.qboBalance)||0),0);
+    bullets.push({tab:'cash', html:'<b>' + partial.length + ' real deal' + (partial.length===1?'':'s') + '</b> partially paid — ' + money(outstanding) + ' still outstanding.'});
+  }
+  if(paid.length){
+    bullets.push({tab:'cash', html:'<b>' + paid.length + ' real deal' + (paid.length===1?'':'s') + '</b> fully paid in QuickBooks.'});
+  }
+  if(SENT_REMINDERS_THIS_SESSION.length){
+    bullets.push({tab:'collections', html:'<b>' + SENT_REMINDERS_THIS_SESSION.length + ' real reminder email' + (SENT_REMINDERS_THIS_SESSION.length===1?'':'s') + '</b> sent this session via Run reminder cycle.'});
+  }
+
+  const headerEl = document.querySelector('.brief h3');
+  const stampEl = document.getElementById('briefStamp');
+  const listEl = document.getElementById('briefList');
+  if(!listEl) return;
+
+  const now = new Date();
+  const dateStr = now.toLocaleDateString(undefined, {weekday:'long', month:'short', day:'numeric'});
+  const timeStr = now.toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit'});
+  if(headerEl) headerEl.innerHTML = '<span class="av">E</span> Morning brief · ' + dateStr + ' · ' + timeStr + ' <span class="pill green dot" style="font-size:9.5px;margin-left:2px">Live</span>';
+  if(stampEl) stampEl.textContent = 'Generated just now from real HubSpot + QuickBooks data · Rally UXR · click a line to open it';
+
+  listEl.innerHTML = bullets.length
+    ? bullets.map(b=>`<li class="clickable" onclick="goToTab('${b.tab}')">${b.html}</li>`).join('')
+    : '<li>Nothing needs your attention right now — all real deals and invoices are on track.</li>';
 }
 
 /* Jump to a tab from any card in the workspace */
@@ -5201,6 +5272,7 @@ async function loadRealDeals(refresh){
     renderPipeline();
     applyRealOverviewKpis();
     applyRealOverviewAttentionKpi();
+    applyRealMorningBrief();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
@@ -5255,6 +5327,7 @@ async function loadRealCollections(refresh){
     COLLECTIONS.unshift(...list);
     renderCollections();
     applyRealOverviewAttentionKpi();
+    applyRealMorningBrief();
     if(list.length){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', list.length + ' real overdue invoice(s) loaded' + staleNote);
@@ -5295,7 +5368,9 @@ async function runReminderCycle(){
       if(skipped.length) parts.push(skipped.length + ' skipped (no billing email on file)');
       toast(failed.length ? 'warn' : 'success', 'Reminder cycle · ' + parts.join(', ') + ' of ' + due + ' due');
     }
+    if(sent && sent.length) SENT_REMINDERS_THIS_SESSION.push(...sent);
     await loadRealCollections(true);
+    if(typeof applyRealMorningBrief === 'function') applyRealMorningBrief();
   }catch(e){
     toast('warn', 'Could not reach the reminder cycle API — is server.py running? (' + e.message + ')');
   }finally{
@@ -5339,6 +5414,7 @@ async function loadRealDealReconciliation(refresh){
     DEAL_RECON = rows;
     if(typeof renderReconTiles === 'function') renderReconTiles();
     if(typeof applyRealOverviewCollectionKpis === 'function') applyRealOverviewCollectionKpis();
+    if(typeof applyRealMorningBrief === 'function') applyRealMorningBrief();
     if(rows.length){
       const matchedCount = rows.filter(r=>r.status!=='not_invoiced').length;
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
