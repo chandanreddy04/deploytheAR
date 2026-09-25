@@ -4617,6 +4617,32 @@ function applyClient(){
   renderSchedule();
 }
 
+// Phase 1 (Overview real-data rework): overlays a real deal count/value/
+// review-status breakdown onto the "Deals closed 7d" tile once real deals
+// have loaded, replacing CLIENT_PROFILES' fabricated numbers. Only for the
+// primary/real client view -- applyClient() only ever runs once at init,
+// before this, so there's no later re-run that could stomp on it.
+function applyRealOverviewKpis(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  if(!realDeals.length) return;
+
+  const totalValue = realDeals.reduce((s,d)=>s+(Number(d.amt)||0), 0);
+  const awaiting = realDeals.filter(d=>dealReviewStatus(d).key==='awaiting').length;
+  const approved = realDeals.filter(d=>dealReviewStatus(d).key==='approved').length;
+  const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed').length;
+
+  const labelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(1) .l');
+  if(labelEl) labelEl.textContent = 'Real deals';
+  const dealsEl = document.getElementById('kpiDeals');
+  if(dealsEl) dealsEl.innerHTML = realDeals.length + ' <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const metaParts = [money(totalValue) + ' total value', awaiting + ' awaiting review'];
+  if(approved) metaParts.push(approved + ' approved');
+  if(failed) metaParts.push(failed + ' failed extraction');
+  const metaEl = document.getElementById('kpiDealsMeta');
+  if(metaEl) metaEl.textContent = metaParts.join(' · ');
+}
+
 /* Jump to a tab from any card in the workspace */
 function goToTab(tab){
   const nav = document.querySelector('.ssb .ni[data-tab="'+tab+'"]');
@@ -5097,6 +5123,7 @@ async function loadRealDeals(refresh){
     for(let i = DEALS.length - 1; i >= 0; i--){ if(DEALS[i].real) DEALS.splice(i, 1); }
     DEALS.unshift(...payload.deals);
     renderPipeline();
+    applyRealOverviewKpis();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
