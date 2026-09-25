@@ -527,6 +527,9 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
 /* Daily reconciliation tiles */
 .recon-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:16px 18px}
 .recon-tile{background:var(--tone-bg,var(--surface-2));border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.recon-tile.clickable{cursor:pointer;transition:box-shadow .12s}
+.recon-tile.clickable:hover{box-shadow:0 0 0 1px var(--tone,var(--purple,#6d5ef8))}
+.recon-tile.clickable:active{transform:scale(0.98)}
 .recon-tile .rt-hd{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2);font-weight:600}
 .recon-tile .rt-ico{width:22px;height:22px;border-radius:50%;background:var(--tone,#666);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .recon-tile .rt-lbl{color:var(--tone,var(--text-2));font-weight:700;letter-spacing:.2px}
@@ -972,9 +975,9 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
     <!-- ============= COLLECTIONS QUEUE ============= -->
     <section class="screen" id="scr-collections">
       <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
-        <div class="kpi"><div class="l">Total overdue</div><div class="v" id="collKpiTotal">—</div><div class="meta" id="collKpiTotalMeta">—</div></div>
-        <div class="kpi"><div class="l">Avg DPD</div><div class="v"><span id="collKpiAvgDpd">—</span><span style="font-size:14px;color:var(--text-2);font-weight:500"> days</span></div><div class="meta" id="collKpiAvgDpdMeta">—</div></div>
-        <div class="kpi"><div class="l">Disputes paused</div><div class="v" id="collKpiPaused">—</div><div class="meta" id="collKpiPausedMeta">—</div></div>
+        <div class="kpi clickable" onclick="scrollToSection('kanban-collections')" role="button" tabindex="0"><div class="l">Total overdue</div><div class="v" id="collKpiTotal">—</div><div class="meta" id="collKpiTotalMeta">—</div></div>
+        <div class="kpi clickable" onclick="scrollToSection('kanban-collections')" role="button" tabindex="0"><div class="l">Avg DPD</div><div class="v"><span id="collKpiAvgDpd">—</span><span style="font-size:14px;color:var(--text-2);font-weight:500"> days</span></div><div class="meta" id="collKpiAvgDpdMeta">—</div></div>
+        <div class="kpi clickable" onclick="scrollToSection('kanban-collections')" role="button" tabindex="0"><div class="l">Disputes paused</div><div class="v" id="collKpiPaused">—</div><div class="meta" id="collKpiPausedMeta">—</div></div>
       </div>
       <div class="section">
         <div class="sh">
@@ -4228,6 +4231,16 @@ function _computeReconData(){
   return {invAmt, invCnt:invoiced.length, payAmt:paidAmt, payCnt:invoiced.length, glAmt:paidAmt, glCnt:invoiced.length, varianceRows};
 }
 
+// Scroll-only tile click: Cash Application and Collections don't have a
+// filter-chip system the way Deal Pipeline does -- their tables already
+// show every real row with nothing hidden, so there's no distinct
+// subset for a tile click to filter down to. This just jumps the page
+// to the relevant section instead, as a navigation shortcut.
+function scrollToSection(id){
+  const el = document.getElementById(id);
+  if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
 function renderReconTiles(){
   const wrap = document.getElementById('reconTiles');
   if(!wrap) return;
@@ -4244,17 +4257,17 @@ function renderReconTiles(){
     ? payCnt+' invoiced deal'+(payCnt===1?'':'s')+(variance!==0?' · '+money(variance)+' still outstanding':' · fully collected')
     : payCnt+' payments · mismatch '+money(variance);
   wrap.innerHTML = `
-    <div class="recon-tile" style="--tone:#0d6b2c;--tone-bg:var(--green-bg)">
+    <div class="recon-tile clickable" onclick="scrollToSection('dealReconSection')" style="--tone:#0d6b2c;--tone-bg:var(--green-bg)">
       <div class="rt-hd"><span class="rt-ico">✓</span><span class="rt-lbl">Invoices sent${liveTag}</span></div>
       <div class="rt-v">${money(invAmt)}</div>
       <div class="rt-meta">${invMeta}</div>
     </div>
-    <div class="recon-tile" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
+    <div class="recon-tile clickable" onclick="scrollToSection('dealReconSection')" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
       <div class="rt-hd"><span class="rt-ico">!</span><span class="rt-lbl">Payments received${liveTag}</span></div>
       <div class="rt-v">${money(payAmt)}</div>
       <div class="rt-meta">${payMeta}</div>
     </div>
-    <div class="recon-tile" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
+    <div class="recon-tile clickable" onclick="scrollToSection('dealReconSection')" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
       <div class="rt-hd"><span class="rt-ico">!</span><span class="rt-lbl">Cash applied${real?' (QuickBooks)':' to GL'}${liveTag}</span></div>
       <div class="rt-v">${money(glAmt)}</div>
       <div class="rt-meta">${glCnt} real deal${glCnt===1?'':'s'}${real?' reconciled against QuickBooks':' · matches payments received'}</div>
