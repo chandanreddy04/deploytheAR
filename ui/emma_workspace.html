@@ -4643,6 +4643,38 @@ function applyRealOverviewKpis(){
   if(metaEl) metaEl.textContent = metaParts.join(' · ');
 }
 
+// Phase 2 (Overview real-data rework): overlays real collection rate and
+// outstanding balance onto the "Invoices sent 7d" / "Avg days-to-cash"
+// tiles once real deal reconciliation data has loaded. Same real
+// deal-vs-QuickBooks numbers the Cash Application page's Daily
+// reconciliation tiles already show -- one source of truth
+// (DEAL_RECON), just summarized differently here.
+function applyRealOverviewCollectionKpis(){
+  if(currentClient !== 'rally') return;
+  const invoiced = (DEAL_RECON || []).filter(d=>d.status!=='not_invoiced');
+  if(!invoiced.length) return;
+
+  const totalInvoiced = invoiced.reduce((s,d)=>s+(Number(d.qboTotal)||0), 0);
+  const totalOutstanding = invoiced.reduce((s,d)=>s+(Number(d.qboBalance)||0), 0);
+  const totalCollected = totalInvoiced - totalOutstanding;
+  const rate = totalInvoiced ? Math.round((totalCollected / totalInvoiced) * 100) : 0;
+  const outstandingCount = invoiced.filter(d=>(Number(d.qboBalance)||0) > 0).length;
+
+  const invLabelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(2) .l');
+  if(invLabelEl) invLabelEl.textContent = 'Collection rate';
+  const invEl = document.getElementById('kpiInvoices');
+  if(invEl) invEl.innerHTML = rate + '% <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const invMetaEl = document.getElementById('kpiInvoicesMeta');
+  if(invMetaEl) invMetaEl.textContent = money(totalCollected) + ' of ' + money(totalInvoiced) + ' collected';
+
+  const dtcLabelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(3) .l');
+  if(dtcLabelEl) dtcLabelEl.textContent = 'Outstanding balance';
+  const dtcEl = document.getElementById('kpiDTC');
+  if(dtcEl) dtcEl.innerHTML = money(totalOutstanding) + ' <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const dtcMetaEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(3) .meta');
+  if(dtcMetaEl) dtcMetaEl.textContent = outstandingCount + ' real deal' + (outstandingCount===1?'':'s') + ' with a balance due';
+}
+
 /* Jump to a tab from any card in the workspace */
 function goToTab(tab){
   const nav = document.querySelector('.ssb .ni[data-tab="'+tab+'"]');
@@ -5260,6 +5292,7 @@ async function loadRealDealReconciliation(refresh){
     renderDealReconciliation(rows);
     DEAL_RECON = rows;
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    if(typeof applyRealOverviewCollectionKpis === 'function') applyRealOverviewCollectionKpis();
     if(rows.length){
       const matchedCount = rows.filter(r=>r.status!=='not_invoiced').length;
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
