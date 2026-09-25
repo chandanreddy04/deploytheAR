@@ -645,6 +645,19 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         </div>
       </div>
 
+      <!-- Real AR aging summary -- hidden until real data loads (Overview
+           Phase 4), same pattern as Cash Application's dealReconSection. -->
+      <div class="section" id="agingSummarySection" style="display:none">
+        <div class="sh">
+          <h3>AR aging</h3>
+          <span class="desc">· real outstanding invoices, by days overdue</span>
+          <div class="right"><span class="pill green dot" style="font-size:9.5px">Live</span></div>
+        </div>
+        <div class="body">
+          <div class="kpis" id="agingBuckets" style="grid-template-columns:repeat(5,1fr)"></div>
+        </div>
+      </div>
+
       <!-- Morning brief -->
       <div class="brief">
         <h3><span class="av">E</span> Morning brief · Tuesday Sep 15 · 7:00am</h3>
@@ -5336,10 +5349,45 @@ async function loadRealDealReconciliation(refresh){
   }
 }
 
+// Phase 4 (Overview real-data rework): real AR aging buckets from
+// /api/invoices/aging (server-side, cached/DB-backed same as every other
+// real endpoint) -- unlike Phases 1-3, this data isn't already loaded by
+// any other page, so it needs its own fetch rather than reusing one.
+async function loadRealAging(refresh){
+  try{
+    const res = await fetch('/api/invoices/aging' + (refresh ? '?refresh=1' : ''));
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    const buckets = payload.buckets || [];
+    if(payload.error && !buckets.length){
+      toast('warn', 'Live AR aging unavailable: ' + payload.error);
+      return;
+    }
+    const wrap = document.getElementById('agingBuckets');
+    const section = document.getElementById('agingSummarySection');
+    if(!wrap || !section) return;
+    if(!buckets.length){ section.style.display = 'none'; return; }
+    section.style.display = '';
+    wrap.innerHTML = buckets.map(b=>`
+      <div class="kpi">
+        <div class="l">${esc(b.label)}</div>
+        <div class="v${b.label==='90+ days' && b.total>0 ? ' red' : ''}">${money(b.total)}</div>
+        <div class="meta">${b.count} invoice${b.count===1?'':'s'}</div>
+      </div>`).join('');
+    if(buckets.length){
+      const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
+      toast(payload.error ? 'warn' : 'success', money(payload.grandTotal) + ' real outstanding across ' + buckets.reduce((s,b)=>s+b.count,0) + ' invoice(s)' + staleNote);
+    }
+  }catch(e){
+    toast('warn', 'Could not reach the live AR aging API — is server.py running? (' + e.message + ')');
+  }
+}
+
 loadRealDeals(false);
 loadRealCash(false);
 loadRealCollections(false);
 loadRealDealReconciliation(false);
+loadRealAging(false);
 </script>
 
 <!-- ================== ASK EMMA CHAT ================== -->

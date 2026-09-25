@@ -48,6 +48,7 @@ _cache: dict = {"deals": None, "computed_at": 0.0, "error": None}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
 _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": None}
 _deal_recon_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
+_aging_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _CACHE_TTL_SECONDS = 300  # re-fetch at most every 5 minutes even without ?refresh=1
 
 # Durable cache instead of the in-memory-only caches above going stale on
@@ -577,6 +578,63 @@ def _real_outstanding_invoices() -> list[dict]:
     return out
 
 
+# Same standard AR aging buckets as ar_aging_report.py's CLI report,
+# exposed over HTTP too so the Overview page (a browser page, can't run a
+# Python script) can show a real aging summary. Duplicated rather than
+# imported from ar_aging_report.py -- that script already imports from
+# this module, so importing back would be circular.
+_AGING_BUCKET_ORDER = ["Current", "1-30 days", "31-60 days", "61-90 days", "90+ days"]
+
+
+def _aging_bucket_for(dpd: int) -> str:
+    if dpd <= 0:
+        return "Current"
+    if dpd <= 30:
+        return "1-30 days"
+    if dpd <= 60:
+        return "31-60 days"
+    if dpd <= 90:
+        return "61-90 days"
+    return "90+ days"
+
+
+def compute_aging_summary() -> dict:
+    rows = _real_outstanding_invoices()
+    totals = {label: 0.0 for label in _AGING_BUCKET_ORDER}
+    counts = {label: 0 for label in _AGING_BUCKET_ORDER}
+    for r in rows:
+        bucket = _aging_bucket_for(r["dpd"])
+        totals[bucket] += r["balance"]
+        counts[bucket] += 1
+    return {
+        "buckets": [
+            {"label": label, "total": round(totals[label], 2), "count": counts[label]}
+            for label in _AGING_BUCKET_ORDER
+        ],
+        "grandTotal": round(sum(totals.values()), 2),
+    }
+
+
+def get_aging_summary(force_refresh: bool = False) -> tuple[dict | None, str | None]:
+    if _aging_cache["data"] is None and not force_refresh:
+        data, computed_at, error = _db_load("aging")
+        if data is not None:
+            _aging_cache["data"], _aging_cache["computed_at"], _aging_cache["error"] = data, computed_at, error
+
+    stale = time.time() - _aging_cache["computed_at"] > _CACHE_TTL_SECONDS
+    if force_refresh or _aging_cache["data"] is None or stale:
+        try:
+            _aging_cache["data"] = compute_aging_summary()
+            _aging_cache["error"] = None
+        except Exception as exc:
+            _aging_cache["error"] = str(exc)
+            if _aging_cache["data"] is None:
+                _aging_cache["data"] = {"buckets": [], "grandTotal": 0}
+        _aging_cache["computed_at"] = time.time()
+        _db_save("aging", _aging_cache["data"], _aging_cache["computed_at"], _aging_cache["error"])
+    return _aging_cache["data"], _aging_cache["error"]
+
+
 def compute_collections() -> list[dict]:
     """Real overdue invoices from the QuickBooks sandbox, each paired with a
     draft dunning email built from real invoice/customer data.
@@ -878,6 +936,12 @@ class Handler(BaseHTTPRequestHandler):
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             recon, error = get_deal_reconciliation(force_refresh=force)
             self._send_json({"reconciliation": recon, "error": error, "computed_at": _deal_recon_cache["computed_at"]})
+            return
+
+        if path == "/api/invoices/aging":
+            force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
+            summary, error = get_aging_summary(force_refresh=force)
+            self._send_json({**summary, "error": error, "computed_at": _aging_cache["computed_at"]})
             return
 
         if path.startswith("/api/deals/") and path.endswith("/pdf"):
