@@ -9,21 +9,21 @@ the existing mock data in emma_workspace.html; those workflows don't
 exist yet.
 
 Real deals/cash/collections are computed once and cached both in memory
-and in rally_state.db (SQLite, gitignored, created next to this project's
-root on first run) -- API calls aren't free and this project has already
-hit real rate limits calling too often, and used to re-pay that cost on
-every restart since nothing survived the process exiting. Hit
+and durably via db.py -- SQLite (rally_state.db, gitignored, project root)
+locally, or Postgres automatically when DATABASE_URL is set (e.g. deployed
+on Railway). API calls aren't free and this project has already hit real
+rate limits calling too often, and used to re-pay that cost on every
+restart since nothing survived the process exiting. Hit
 /api/deals?refresh=1 (etc.) to force a recompute.
 
 Usage:
-    python server.py [port]        # default port 8600
+    python server.py [port]        # default port 8600, or $PORT if set (Railway)
 """
 
 from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -39,6 +39,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from config import load_settings
 from content_extractor import extract
+from db import db_load as _db_load, db_save as _db_save
 from pdf_text import extract_text
 
 UI_DIR = Path(__file__).parent
@@ -49,52 +50,15 @@ _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": No
 _deal_recon_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _CACHE_TTL_SECONDS = 300  # re-fetch at most every 5 minutes even without ?refresh=1
 
-# SQLite instead of the in-memory-only caches above going stale on every
-# restart -- a restart used to always force a full re-extraction of every
-# real deal through Groq (the exact rate-limit storm that's hit this
+# Durable cache instead of the in-memory-only caches above going stale on
+# every restart -- a restart used to always force a full re-extraction of
+# every real deal through Groq (the exact rate-limit storm that's hit this
 # project more than once), because nothing survived the process exiting.
-# One tiny key/value table is enough: each cache's whole snapshot (the
-# same shape it already holds in memory) is stored as one JSON blob under
-# its own key, alongside the same computed_at/error the in-memory dict
-# already tracks. This is a "latest known state" store, not a history
-# log -- each write replaces the previous one for that key, on purpose.
-_DB_PATH = ROOT / "rally_state.db"
-
-
-def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_DB_PATH)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS cache_store ("
-        "key TEXT PRIMARY KEY, data TEXT, computed_at REAL, error TEXT)"
-    )
-    return conn
-
-
-def _db_load(key: str) -> tuple[object | None, float, str | None]:
-    conn = _db()
-    try:
-        row = conn.execute(
-            "SELECT data, computed_at, error FROM cache_store WHERE key = ?", (key,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None, 0.0, None
-    data_json, computed_at, error = row
-    return (json.loads(data_json) if data_json is not None else None), computed_at, error
-
-
-def _db_save(key: str, data: object, computed_at: float, error: str | None) -> None:
-    conn = _db()
-    try:
-        conn.execute(
-            "INSERT INTO cache_store (key, data, computed_at, error) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET data=excluded.data, computed_at=excluded.computed_at, error=excluded.error",
-            (key, json.dumps(data), computed_at, error),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+# db.py (imported above) handles SQLite locally or Postgres automatically
+# when DATABASE_URL is set (e.g. deployed on Railway) -- same
+# cache_store(key, data, computed_at, error) shape either way. This is a
+# "latest known state" store, not a history log -- each write replaces
+# the previous one for that key, on purpose.
 
 # Design-doc dunning cadence (Section 10), each threshold the minimum
 # days-overdue for that stage -- checked highest-first so an invoice lands
@@ -1103,8 +1067,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8600
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    import os
+
+    # CLI arg wins if given (local dev convention, e.g. `python server.py 8600`),
+    # otherwise PORT (Railway sets this automatically for a deployed service),
+    # otherwise the same 8600 default as before.
+    if len(sys.argv) > 1:
+        port = int(sys.argv[1])
+    else:
+        port = int(os.environ.get("PORT", "8600"))
+    # 0.0.0.0 instead of 127.0.0.1 -- required for the service to be reachable
+    # at all once deployed (Railway routes traffic to the container's network
+    # interface, not just localhost inside it); harmless locally too, still
+    # reachable at http://127.0.0.1:<port> or http://localhost:<port>.
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Emma UI (live HubSpot deals) — http://127.0.0.1:{port}")
     try:
         httpd.serve_forever()
