@@ -4675,6 +4675,37 @@ function applyRealOverviewCollectionKpis(){
   if(dtcMetaEl) dtcMetaEl.textContent = outstandingCount + ' real deal' + (outstandingCount===1?'':'s') + ' with a balance due';
 }
 
+// Phase 3 (Overview real-data rework): overlays a real "needs your
+// attention" rollup onto the "Decisions waiting on you" tile -- real
+// deals awaiting review or failed extraction (DEALS) plus real invoices
+// genuinely overdue (COLLECTIONS, dpd > 0 -- excludes the pre-due window,
+// since "not due yet" isn't something needing attention right now).
+// Called from both loadRealDeals() and loadRealCollections(), since
+// either can finish first; each call just recomputes from whatever's
+// currently in both global arrays.
+function applyRealOverviewAttentionKpi(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  const realCollections = COLLECTIONS.filter(c=>c.real);
+  if(!realDeals.length && !realCollections.length) return;
+
+  const awaiting = realDeals.filter(d=>dealReviewStatus(d).key==='awaiting').length;
+  const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed').length;
+  const overdue = realCollections.filter(c=>(Number(c.dpd)||0) > 0).length;
+  const total = awaiting + failed + overdue;
+
+  const labelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(4) .l');
+  if(labelEl) labelEl.textContent = 'Needs your attention';
+  const el = document.getElementById('kpiDecisions');
+  if(el) el.innerHTML = total + ' <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const metaParts = [];
+  if(awaiting) metaParts.push(awaiting + ' deal' + (awaiting===1?'':'s') + ' awaiting review');
+  if(overdue) metaParts.push(overdue + ' invoice' + (overdue===1?'':'s') + ' overdue');
+  if(failed) metaParts.push(failed + ' failed extraction' + (failed===1?'':'s'));
+  const metaEl = document.getElementById('kpiDecisionsMeta');
+  if(metaEl) metaEl.textContent = metaParts.length ? metaParts.join(' · ') : 'Nothing needs your attention right now';
+}
+
 /* Jump to a tab from any card in the workspace */
 function goToTab(tab){
   const nav = document.querySelector('.ssb .ni[data-tab="'+tab+'"]');
@@ -5156,6 +5187,7 @@ async function loadRealDeals(refresh){
     DEALS.unshift(...payload.deals);
     renderPipeline();
     applyRealOverviewKpis();
+    applyRealOverviewAttentionKpi();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
@@ -5209,6 +5241,7 @@ async function loadRealCollections(refresh){
     for(let i = COLLECTIONS.length - 1; i >= 0; i--){ if(COLLECTIONS[i].real) COLLECTIONS.splice(i, 1); }
     COLLECTIONS.unshift(...list);
     renderCollections();
+    applyRealOverviewAttentionKpi();
     if(list.length){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', list.length + ' real overdue invoice(s) loaded' + staleNote);
