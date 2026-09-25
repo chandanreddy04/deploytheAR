@@ -1601,7 +1601,12 @@ function getDeals(){
   if(currentClient==='trade')   return TRADE_DEALS;
   if(currentClient==='halcyon') return HALCYON_DEALS;
   if(currentClient==='all')     return DEALS.concat(TRADE_DEALS, HALCYON_DEALS);
-  return DEALS;
+  // Real deals only, same as Cash Application/Collections -- DEALS still
+  // carries its original demo cards underneath the real ones
+  // loadRealDeals() unshifts in, but the Deal Pipeline tiles and table
+  // should only ever reflect real HubSpot deals, not this page's own
+  // pre-existing demo cards.
+  return DEALS.filter(d=>d.real);
 }
 function getApprovals(){
   if(currentClient==='trade')   return TRADE_APPROVALS;
