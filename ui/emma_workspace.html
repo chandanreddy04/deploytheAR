@@ -101,6 +101,10 @@ a{color:inherit;text-decoration:none}
 /* KPI cards */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow)}
+.kpi.clickable{cursor:pointer;transition:border-color .12s,transform .12s}
+.kpi.clickable:hover{border-color:var(--purple,#6d5ef8)}
+.kpi.clickable:active{transform:scale(0.98)}
+.kpi.clickable.active{border-color:var(--purple,#6d5ef8);box-shadow:0 0 0 1px var(--purple,#6d5ef8)}
 .kpi .l{font-size:11.5px;color:var(--text-2);font-weight:500}
 .kpi .v{font-size:28px;font-weight:700;letter-spacing:-0.4px;margin-top:6px;line-height:1.05}
 .kpi .v.red{color:var(--red)}
@@ -794,9 +798,9 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       </div>
 
       <div class="kpis" id="dealReviewKpis">
-        <div class="kpi"><div class="l">Awaiting review</div><div class="v" id="drKpiAwait">0</div><div class="meta" id="drKpiAwaitMeta">Freshly parsed, ready for you</div></div>
-        <div class="kpi"><div class="l">Approved this week</div><div class="v" id="drKpiApproved">0</div><div class="meta" id="drKpiApprovedMeta">Flowed to invoicing schedule</div></div>
-        <div class="kpi"><div class="l">Failed extraction</div><div class="v red" id="drKpiFailed">0</div><div class="meta" id="drKpiFailedMeta">Parser could not read terms</div></div>
+        <div class="kpi clickable" data-drfilter="awaiting" role="button" tabindex="0"><div class="l">Awaiting review</div><div class="v" id="drKpiAwait">0</div><div class="meta" id="drKpiAwaitMeta">Freshly parsed, ready for you</div></div>
+        <div class="kpi clickable" data-drfilter="approved" role="button" tabindex="0"><div class="l">Approved this week</div><div class="v" id="drKpiApproved">0</div><div class="meta" id="drKpiApprovedMeta">Flowed to invoicing schedule</div></div>
+        <div class="kpi clickable" data-drfilter="failed" role="button" tabindex="0"><div class="l">Failed extraction</div><div class="v red" id="drKpiFailed">0</div><div class="meta" id="drKpiFailedMeta">Parser could not read terms</div></div>
         <div class="kpi"><div class="l">Avg time-to-review</div><div class="v" id="drKpiAvg">12<span style="font-size:14px;color:var(--text-2);font-weight:500"> min</span></div><div class="meta">Trailing 30 days</div></div>
       </div>
 
@@ -2086,14 +2090,32 @@ function renderPipeline(){
   if(nav) nav.textContent = awaitCount + failedCount;
 }
 
+// Sets the Deal Pipeline status filter and keeps the filter chips + the
+// clickable KPI tiles above the table in sync with each other, whichever
+// one was actually clicked -- both are just two entry points to the same
+// dealReviewFilter state.
+function setDealReviewFilter(key){
+  dealReviewFilter = key || 'all';
+  document.querySelectorAll('#dealReviewChips .sch-chip').forEach(x=>x.classList.toggle('active', x.dataset.drfilter===dealReviewFilter));
+  document.querySelectorAll('#dealReviewKpis .kpi.clickable').forEach(x=>x.classList.toggle('active', x.dataset.drfilter===dealReviewFilter));
+  renderPipeline();
+  const table = document.getElementById('tbl-deal-review');
+  if(table) table.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
 // Filter chip handler
 document.addEventListener('click', function(e){
-  const btn = e.target.closest('#dealReviewChips .sch-chip');
-  if(!btn) return;
-  document.querySelectorAll('#dealReviewChips .sch-chip').forEach(x=>x.classList.remove('active'));
-  btn.classList.add('active');
-  dealReviewFilter = btn.dataset.drfilter || 'all';
-  renderPipeline();
+  const chip = e.target.closest('#dealReviewChips .sch-chip');
+  if(chip){ setDealReviewFilter(chip.dataset.drfilter); return; }
+  const tile = e.target.closest('#dealReviewKpis .kpi.clickable');
+  if(tile){ setDealReviewFilter(tile.dataset.drfilter); return; }
+});
+document.addEventListener('keydown', function(e){
+  if(e.key !== 'Enter' && e.key !== ' ') return;
+  const tile = e.target.closest && e.target.closest('#dealReviewKpis .kpi.clickable');
+  if(!tile) return;
+  e.preventDefault();
+  setDealReviewFilter(tile.dataset.drfilter);
 });
 
 function _dueDateFromTerms(terms){
