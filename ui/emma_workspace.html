@@ -616,7 +616,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         <h1 class="title">Emma · Revenue Cycle Coworker · Rally UXR</h1>
         <div class="subtitle" id="pageSubtitle">Emma sits above your invoicing tool (Ramp, bill.com, Chargebee, Stripe) and orchestrates the deal-to-cash workflow across HubSpot, QuickBooks, and your finance inbox.</div>
       </div>
-      <div class="right"><span class="live-dot"></span> Tuesday, September 15, 2026 · live</div>
+      <div class="right"><span class="live-dot"></span> <span id="topDateStamp">Tuesday, September 15, 2026 · live</span></div>
     </div>
 
     <div class="content">
@@ -5458,6 +5458,21 @@ async function loadRealAging(refresh){
     toast('warn', 'Could not reach the live AR aging API — is server.py running? (' + e.message + ')');
   }
 }
+
+// Real-time top-of-page date stamp -- was a fixed "Tuesday, September 15,
+// 2026 · live" that never actually changed despite the "live" label.
+// Ticks every second off the browser's own clock (no API call needed --
+// this is just the current date/time, not data that comes from a server).
+function updateTopDateStamp(){
+  const el = document.getElementById('topDateStamp');
+  if(!el) return;
+  const now = new Date();
+  const dateStr = now.toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'});
+  const timeStr = now.toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit', second:'2-digit'});
+  el.textContent = dateStr + ' · ' + timeStr + ' · live';
+}
+updateTopDateStamp();
+setInterval(updateTopDateStamp, 1000);
 
 loadRealDeals(false);
 loadRealCash(false);
