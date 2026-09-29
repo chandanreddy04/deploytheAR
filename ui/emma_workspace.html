@@ -2318,6 +2318,7 @@ function approveDeal(id){
     }
     renderPipeline();
     renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
     const msg = invs.length > 1
       ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
       : `Approved · ${first.id} created from contract, staged in Draft`;
@@ -4843,6 +4844,47 @@ function applyRealRenewals(){
   </tr>`).join('');
 }
 
+// Real "Scheduled invoices": future installments of REAL invoices Phase 1
+// already generates when a real deal is approved (INVOICE_PIPELINE.rally,
+// real:true entries) -- not real QuickBooks invoices. That option was
+// deliberately rejected earlier as redundant with Collections and for
+// mixing already-paid items into a "coming up" list. This matches the
+// section's own subtitle ("Emma will draft each on its due date")
+// literally -- these are exactly the invoices Emma has already drafted
+// (client-side, per the read-only-QBO rule) and hasn't sent yet.
+// Genuinely empty until a real deal with a recurring/upcoming schedule
+// gets approved -- honest, not a bug.
+function applyRealScheduledInvoices(){
+  if(currentClient !== 'rally') return;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const horizon = new Date(today); horizon.setDate(horizon.getDate() + 90);
+  const stageLabel = s => s==='draft' ? 'Draft' : s==='sent' ? 'Sent'
+    : s==='approval' ? 'Awaiting approval' : s==='scheduled' ? 'Scheduled'
+    : (s ? s[0].toUpperCase()+s.slice(1) : 'Scheduled');
+
+  const rows = [];
+  for(const inv of INVOICE_PIPELINE.rally){
+    if(!inv.real || inv.stage === 'paid' || !inv.dueDate) continue;
+    const d = new Date(inv.dueDate + 'T00:00:00');
+    if(isNaN(d.getTime()) || d < today || d > horizon) continue;
+    rows.push({due: inv.dueDate, client: inv.customer || inv.client, contract: inv.ctag, milestone: inv.milestone, amount: inv.amount, status: stageLabel(inv.stage)});
+  }
+  rows.sort((a,b) => a.due.localeCompare(b.due));
+
+  RALLY_FORWARD.length = 0;
+  RALLY_FORWARD.push(...rows);
+  if(currentClient === 'rally') renderRevForecast();
+
+  if(!rows.length){
+    const tbody = document.querySelector('#tbl-rev-forecast tbody');
+    const lbl = document.getElementById('revForecastLbl');
+    const val = document.getElementById('revForecastVal');
+    if(tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty">No real invoices scheduled in the next 90 days — approve a real deal to see its upcoming installments here</td></tr>';
+    if(lbl) lbl.textContent = 'Forecast: $0 across 0 real invoices in next 90 days';
+    if(val) val.textContent = '$0K';
+  }
+}
+
 /* Jump to a tab from any card in the workspace */
 function goToTab(tab){
   const nav = document.querySelector('.ssb .ni[data-tab="'+tab+'"]');
@@ -5327,6 +5369,7 @@ async function loadRealDeals(refresh){
     applyRealOverviewAttentionKpi();
     applyRealMorningBrief();
     applyRealRenewals();
+    applyRealScheduledInvoices();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
