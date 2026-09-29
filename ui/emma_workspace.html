@@ -750,26 +750,26 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
           <div class="agents-strip">
             <div class="agent-pill clickable" onclick="goToTab('pipeline')">
               <div class="hd"><span class="led live"></span><span class="nm">HubSpot Sync</span></div>
-              <div class="lr">Last run 2 min ago</div>
-              <div class="inc">3 events today · 0 incidents</div>
+              <div class="lr" id="agentHubspotLr">Last run 2 min ago</div>
+              <div class="inc" id="agentHubspotInc">3 events today · 0 incidents</div>
               <a class="op" onclick="event.stopPropagation();goToTab('pipeline')">Open →</a>
             </div>
             <div class="agent-pill clickable" onclick="goToTab('invpipe')">
               <div class="hd"><span class="led live"></span><span class="nm">Invoicing</span></div>
-              <div class="lr">Last run 14 min ago</div>
-              <div class="inc">3 invoices drafted · 1 held for approval</div>
+              <div class="lr" id="agentInvoicingLr">Last run 14 min ago</div>
+              <div class="inc" id="agentInvoicingInc">3 invoices drafted · 1 held for approval</div>
               <a class="op" onclick="event.stopPropagation();goToTab('invpipe')">Open →</a>
             </div>
             <div class="agent-pill clickable" onclick="goToTab('cash')">
               <div class="hd"><span class="led live"></span><span class="nm">Cash Application</span></div>
-              <div class="lr">Last run 6 min ago</div>
-              <div class="inc">7 applied · 2 unmatched</div>
+              <div class="lr" id="agentCashLr">Last run 6 min ago</div>
+              <div class="inc" id="agentCashInc">7 applied · 2 unmatched</div>
               <a class="op" onclick="event.stopPropagation();goToTab('cash')">Open →</a>
             </div>
             <div class="agent-pill clickable" onclick="goToTab('collections')">
               <div class="hd"><span class="led live"></span><span class="nm">AR Collections</span></div>
-              <div class="lr">Last run 1 hr ago</div>
-              <div class="inc">4 first-notices sent · 1 dispute paused</div>
+              <div class="lr" id="agentCollectionsLr">Last run 1 hr ago</div>
+              <div class="inc" id="agentCollectionsInc">4 first-notices sent · 1 dispute paused</div>
               <a class="op" onclick="event.stopPropagation();goToTab('collections')">Open →</a>
             </div>
             <div class="agent-pill roadmap">
@@ -2319,6 +2319,8 @@ function approveDeal(id){
     renderPipeline();
     renderInvoicePipeline();
     if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
+    if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
     const msg = invs.length > 1
       ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
       : `Approved · ${first.id} created from contract, staged in Draft`;
@@ -4615,6 +4617,11 @@ let currentClient = 'rally';
 // page reload. Cleared on refresh, same lifetime as every other
 // client-side-only real-data array in this file.
 let SENT_REMINDERS_THIS_SESSION = [];
+// Real computed_at timestamps (unix seconds) from each real endpoint's own
+// response -- captured by loadRealDeals()/loadRealCash()/loadRealCollections()
+// so the Team of agents cards can show a genuine "last run" time instead of
+// a fixed fake one.
+let REAL_COMPUTED_AT = {deals: null, cash: null, collections: null, invoicing: null};
 
 function applyClient(){
   const p = CLIENT_PROFILES[currentClient];
@@ -4882,6 +4889,81 @@ function applyRealScheduledInvoices(){
     if(tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty">No real invoices scheduled in the next 90 days — approve a real deal to see its upcoming installments here</td></tr>';
     if(lbl) lbl.textContent = 'Forecast: $0 across 0 real invoices in next 90 days';
     if(val) val.textContent = '$0K';
+  }
+}
+
+function _timeAgo(unixSeconds){
+  if(!unixSeconds) return 'Not run yet';
+  const diffSec = Math.max(0, (Date.now()/1000) - unixSeconds);
+  if(diffSec < 60) return 'Last run just now';
+  const min = Math.round(diffSec/60);
+  if(min < 60) return 'Last run ' + min + ' min ago';
+  const hr = Math.round(min/60);
+  if(hr < 24) return 'Last run ' + hr + ' hr ago';
+  const days = Math.round(hr/24);
+  return 'Last run ' + days + ' day' + (days===1?'':'s') + ' ago';
+}
+
+// Real "Team of agents" cards -- each of the 4 "live" cards (HubSpot Sync/
+// Invoicing/Cash Application/AR Collections) already navigates to a real
+// screen on click; only their text was ever fake. "Portal Upload"/
+// "Contract Parser" are left untouched -- they're honestly labeled "Phase
+// 2 roadmap" already, not something with real data to surface.
+function applyRealAgentCards(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  const realInvoices = INVOICE_PIPELINE.rally.filter(i=>i.real);
+  const realMatched = CASH_MATCHED.filter(c=>c.real);
+  const realPartial = CASH_PARTIAL.filter(c=>c.real);
+  const realUnmatched = CASH_UNMATCHED.filter(c=>c.real);
+  const realCollections = COLLECTIONS.filter(c=>c.real);
+
+  {
+    const lr = document.getElementById('agentHubspotLr');
+    const inc = document.getElementById('agentHubspotInc');
+    if(realDeals.length){
+      const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed').length;
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.deals);
+      if(inc) inc.textContent = realDeals.length + ' real deal' + (realDeals.length===1?'':'s') + ' synced · ' + failed + ' incident' + (failed===1?'':'s');
+    } else {
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.deals);
+      if(inc) inc.textContent = 'No real deals synced yet';
+    }
+  }
+
+  {
+    const drafted = realInvoices.filter(i=>i.stage==='draft').length;
+    const held = realInvoices.filter(i=>i.stage==='approval').length;
+    const lr = document.getElementById('agentInvoicingLr');
+    const inc = document.getElementById('agentInvoicingInc');
+    if(realInvoices.length){
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.invoicing);
+      if(inc) inc.textContent = drafted + ' real invoice' + (drafted===1?'':'s') + ' drafted · ' + held + ' held for approval';
+    } else {
+      if(lr) lr.textContent = 'Not run yet';
+      if(inc) inc.textContent = 'No real invoices drafted yet';
+    }
+  }
+
+  {
+    const applied = realMatched.length + realPartial.length;
+    const lr = document.getElementById('agentCashLr');
+    const inc = document.getElementById('agentCashInc');
+    if(realMatched.length || realPartial.length || realUnmatched.length){
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.cash);
+      if(inc) inc.textContent = applied + ' real applied · ' + realUnmatched.length + ' unmatched';
+    } else {
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.cash);
+      if(inc) inc.textContent = 'No real cash activity yet';
+    }
+  }
+
+  {
+    const overdue = realCollections.filter(c=>(Number(c.dpd)||0) > 0).length;
+    const lr = document.getElementById('agentCollectionsLr');
+    const inc = document.getElementById('agentCollectionsInc');
+    if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.collections);
+    if(inc) inc.textContent = SENT_REMINDERS_THIS_SESSION.length + ' real reminder' + (SENT_REMINDERS_THIS_SESSION.length===1?'':'s') + ' sent · ' + overdue + ' real invoice' + (overdue===1?'':'s') + ' overdue';
   }
 }
 
@@ -5364,12 +5446,14 @@ async function loadRealDeals(refresh){
     }
     for(let i = DEALS.length - 1; i >= 0; i--){ if(DEALS[i].real) DEALS.splice(i, 1); }
     DEALS.unshift(...payload.deals);
+    REAL_COMPUTED_AT.deals = payload.computed_at || REAL_COMPUTED_AT.deals;
     renderPipeline();
     applyRealOverviewKpis();
     applyRealOverviewAttentionKpi();
     applyRealMorningBrief();
     applyRealRenewals();
     applyRealScheduledInvoices();
+    applyRealAgentCards();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
@@ -5398,9 +5482,11 @@ async function loadRealCash(refresh){
     CASH_MATCHED.unshift(...(payload.matched || []));
     CASH_UNMATCHED.unshift(...(payload.unmatched || []));
     CASH_PARTIAL.unshift(...(payload.partial || []));
+    REAL_COMPUTED_AT.cash = payload.computed_at || REAL_COMPUTED_AT.cash;
     const activeTab = document.querySelector('#cash-tabs .subtab.active');
     renderCash(activeTab ? activeTab.dataset.cashtab : 'matched');
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    applyRealAgentCards();
     if(total){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', total + ' real QuickBooks payment/invoice record(s) loaded' + staleNote);
@@ -5422,9 +5508,11 @@ async function loadRealCollections(refresh){
     }
     for(let i = COLLECTIONS.length - 1; i >= 0; i--){ if(COLLECTIONS[i].real) COLLECTIONS.splice(i, 1); }
     COLLECTIONS.unshift(...list);
+    REAL_COMPUTED_AT.collections = payload.computed_at || REAL_COMPUTED_AT.collections;
     renderCollections();
     applyRealOverviewAttentionKpi();
     applyRealMorningBrief();
+    applyRealAgentCards();
     if(list.length){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', list.length + ' real overdue invoice(s) loaded' + staleNote);
