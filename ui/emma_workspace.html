@@ -2630,10 +2630,16 @@ const INVOICE_PIPELINE = {
 };
 
 function getInvoicePipeline(){
-  if(currentClient==='rally')   return INVOICE_PIPELINE.rally.slice();
   if(currentClient==='trade')   return INVOICE_PIPELINE.trade.slice();
   if(currentClient==='halcyon') return INVOICE_PIPELINE.halcyon.slice();
-  return INVOICE_PIPELINE.rally.concat(INVOICE_PIPELINE.trade, INVOICE_PIPELINE.halcyon);
+  if(currentClient==='all')     return INVOICE_PIPELINE.rally.filter(i=>i.real).concat(INVOICE_PIPELINE.trade, INVOICE_PIPELINE.halcyon);
+  // Real invoices only, same as Deal Pipeline/Cash Application/Collections
+  // -- INVOICE_PIPELINE.rally still carries its original demo cards
+  // underneath the real ones createOrUpdateInvoiceFromDeal() unshifts in,
+  // but the Invoice Pipeline board should only ever reflect invoices
+  // drafted from a real approved HubSpot deal, not this page's own
+  // pre-existing demo cards.
+  return INVOICE_PIPELINE.rally.filter(i=>i.real);
 }
 
 function findPipelineInvoice(id){
