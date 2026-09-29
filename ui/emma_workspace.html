@@ -4793,6 +4793,56 @@ function applyRealMorningBrief(){
     : '<li>Nothing needs your attention right now — all real deals and invoices are on track.</li>';
 }
 
+// Real "Renewals coming up": contract term-end date (signed_date +
+// termMonths, both already extracted per real deal -- no new API call
+// needed) falling within the next 90 days. Unlike the mock RENEWALS
+// array, there's no real renewal workflow anywhere in this app to
+// report on, so status is honestly limited to what the contract's own
+// autoRenew field says (true/false/not stated) -- never a fabricated
+// action like "drafted" or "notified sales".
+function applyRealRenewals(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real && d.termMonths && d.contract && d.contract.signed_date);
+  if(!realDeals.length) return;
+
+  const today = new Date();
+  const rows = [];
+  for(const d of realDeals){
+    const signedDate = new Date(d.contract.signed_date);
+    if(isNaN(signedDate.getTime())) continue;
+    const signedISO = signedDate.toISOString().slice(0,10);
+    const termEnd = new Date(_addMonths(signedISO, d.termMonths) + 'T00:00:00');
+    const daysUntil = Math.round((termEnd - today) / 86400000);
+    if(daysUntil < 0 || daysUntil > 90) continue;
+    let status, tone;
+    if(d.autoRenew === true){ status = 'Auto-renews'; tone = 'green'; }
+    else if(d.autoRenew === false){ status = 'Manual renewal needed'; tone = 'amber'; }
+    else { status = 'Not stated in contract'; tone = 'slate'; }
+    rows.push({id:d.id, c:d.c, contract:(d.contract.filename || 'Contract'), val:d.amt, days:daysUntil, status, tone});
+  }
+  rows.sort((a,b)=>a.days-b.days);
+
+  const tbody = document.getElementById('renewalsBody');
+  const stat = document.getElementById('renewalsStat');
+  if(!tbody) return;
+
+  const liveTag = ' <span class="pill green dot" style="font-size:9.5px">Live</span>';
+  if(!rows.length){
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No real deals have a contract term ending in the next 90 days</td></tr>';
+    if(stat) stat.innerHTML = '·' + liveTag + ' 0 real contracts expire in 90 days';
+    return;
+  }
+  const total = rows.reduce((s,r)=>s+(Number(r.val)||0),0);
+  if(stat) stat.innerHTML = '·' + liveTag + ' <b>' + rows.length + ' real contract' + (rows.length===1?'':'s') + '</b> totaling <b>' + money(total) + '</b> expire in 90 days';
+  tbody.innerHTML = rows.map(r=>`<tr onclick="openDealDrawer('${r.id}')">
+    <td>${esc(r.c)} <span class="pill green dot" style="font-size:9px;margin-left:4px">Live</span></td>
+    <td style="font-size:12px;color:var(--text-2)">${esc(r.contract)}</td>
+    <td class="amt-cell">${money(r.val)}</td>
+    <td class="num">${r.days}</td>
+    <td><span class="pill ${r.tone} dot">${esc(r.status)}</span></td>
+  </tr>`).join('');
+}
+
 /* Jump to a tab from any card in the workspace */
 function goToTab(tab){
   const nav = document.querySelector('.ssb .ni[data-tab="'+tab+'"]');
@@ -5276,6 +5326,7 @@ async function loadRealDeals(refresh){
     applyRealOverviewKpis();
     applyRealOverviewAttentionKpi();
     applyRealMorningBrief();
+    applyRealRenewals();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
