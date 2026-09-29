@@ -2293,6 +2293,8 @@ async function sendRealInvoiceEmail(invId){
     }
     renderInvoicePipeline();
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
     closeDrawer();
     toast('success', inv.id + ' emailed to ' + payload.to);
   }catch(e){
@@ -2319,6 +2321,7 @@ function approveDeal(id){
     renderPipeline();
     renderInvoicePipeline();
     if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
     if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
     if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
     const msg = invs.length > 1
@@ -5132,11 +5135,43 @@ let schTimeframe = '30';
 let schStatus = 'all';
 let schSortDir = 1; // 1 ASC, -1 DESC by dueDate
 
+// Real invoices are only ever created once a human approves the deal in
+// Deal Pipeline (createOrUpdateInvoiceFromDeal) -- there is no real "not
+// yet drafted" state to schedule ahead of time, so this maps each real,
+// unpaid invoice (possibly a future installment of a recurring series)
+// straight onto the row shape this page already renders.
+function _realScheduleRows(){
+  return INVOICE_PIPELINE.rally.filter(i=>i.real && i.stage!=='paid').map(inv => ({
+    id: inv.id,
+    dueDate: inv.dueDate,
+    client: inv.customer || inv.client,
+    customer: inv.customer || inv.client,
+    contract: inv.ctag,
+    milestone: inv.milestone,
+    amount: inv.amount,
+    status: inv.stage,
+    linkedDealId: inv.linkedDealId,
+    real: true,
+  }));
+}
+
 function getScheduledInvoices(){
-  if(currentClient==='rally')   return SCHEDULED_INVOICES.rally.slice();
+  if(currentClient==='rally')   return _realScheduleRows();
   if(currentClient==='trade')   return SCHEDULED_INVOICES.trade.slice();
   if(currentClient==='halcyon') return SCHEDULED_INVOICES.halcyon.slice();
-  return SCHEDULED_INVOICES.rally.concat(SCHEDULED_INVOICES.trade, SCHEDULED_INVOICES.halcyon);
+  return _realScheduleRows().concat(SCHEDULED_INVOICES.trade, SCHEDULED_INVOICES.halcyon);
+}
+
+// "Today" for schedule filtering/KPIs: real invoice due dates are computed
+// from the actual wall clock (see _dueDateFromTerms), not the fictional
+// TODAY_SCH the trade/halcyon demo data was authored against -- so the
+// real (rally) view needs the real date or every bucket would be off by
+// however far TODAY_SCH has drifted from today.
+function _scheduleToday(){
+  if(currentClient === 'rally'){
+    const d = new Date(); d.setHours(0,0,0,0); return d;
+  }
+  return TODAY_SCH;
 }
 
 function clientKeyOf(inv){
@@ -5161,7 +5196,7 @@ function fmtDate(d){
 
 function schMatchesTimeframe(inv, tf){
   const dd = parseDate(inv.dueDate);
-  const delta = daysBetween(TODAY_SCH, dd);
+  const delta = daysBetween(_scheduleToday(), dd);
   if(tf==='week') return delta >= 0 && delta <= 7;
   if(tf==='30')   return delta >= -3 && delta <= 30;
   if(tf==='90')   return delta >= -3 && delta <= 90;
@@ -5189,9 +5224,18 @@ function renderSchedule(){
 
 function renderScheduleKpis(){
   const all = getScheduledInvoices();
-  const in30 = all.filter(i => { const d = daysBetween(TODAY_SCH, parseDate(i.dueDate)); return d >= 0 && d <= 30 && i.status !== 'paid' && i.status !== 'voided'; });
-  const in90 = all.filter(i => { const d = daysBetween(TODAY_SCH, parseDate(i.dueDate)); return d >= 0 && d <= 90 && i.status !== 'paid' && i.status !== 'voided'; });
-  const overdue = all.filter(i => { const d = daysBetween(TODAY_SCH, parseDate(i.dueDate)); return d < 0 && i.status === 'scheduled'; });
+  const today = _scheduleToday();
+  const in30 = all.filter(i => { const d = daysBetween(today, parseDate(i.dueDate)); return d >= 0 && d <= 30 && i.status !== 'paid' && i.status !== 'voided'; });
+  const in90 = all.filter(i => { const d = daysBetween(today, parseDate(i.dueDate)); return d >= 0 && d <= 90 && i.status !== 'paid' && i.status !== 'voided'; });
+  // "Overdue for issuance" for mock data means "should have been drafted
+  // by now" (status==='scheduled'). Real invoices are always drafted the
+  // moment their deal is approved, so there's no real equivalent of that
+  // state -- the honest real signal instead is a drafted invoice whose
+  // due date has already passed without being sent.
+  const overdue = all.filter(i => {
+    const d = daysBetween(today, parseDate(i.dueDate));
+    return d < 0 && (i.status === 'scheduled' || (i.real && i.status === 'draft'));
+  });
   const sum = arr => arr.reduce((s,i)=>s+i.amount, 0);
   const compact = n => n >= 1000 ? '$' + Math.round(n/1000) + 'K' : '$' + n;
 
@@ -5203,10 +5247,10 @@ function renderScheduleKpis(){
   const overdueEl = document.getElementById('schKpiOverdue');
   overdueEl.textContent = overdue.length;
   overdueEl.className = 'v' + (overdue.length > 0 ? ' warn-red' : '');
-  document.getElementById('schKpiOverdueMeta').textContent = overdue.length > 0 ? 'Emma should have drafted these' : 'No backlog';
+  document.getElementById('schKpiOverdueMeta').textContent = overdue.length > 0 ? 'Drafted but past due date, still unsent' : 'No backlog';
 
   const upcoming = all
-    .filter(i => daysBetween(TODAY_SCH, parseDate(i.dueDate)) >= 0 && i.status !== 'paid' && i.status !== 'voided')
+    .filter(i => daysBetween(today, parseDate(i.dueDate)) >= 0 && i.status !== 'paid' && i.status !== 'voided')
     .sort((a,b) => parseDate(a.dueDate) - parseDate(b.dueDate))[0];
   if(upcoming){
     document.getElementById('schKpiNext').textContent = fmtDate(parseDate(upcoming.dueDate));
@@ -5234,9 +5278,18 @@ function renderScheduleList(){
   tbody.innerHTML = rows.map(i => {
     const disabled = (i.status==='paid' || i.status==='voided') ? 'disabled style="opacity:.4;pointer-events:none"' : '';
     const billTo = customerFor(i);
+    const liveChip = i.real ? ' <span class="pill green dot" style="font-size:9.5px;margin-left:4px">Live</span>' : '';
+    // Real invoices are drafted the instant their deal is approved (no
+    // "not yet drafted" real state to advance), and there's no real
+    // voided/cancelled concept anywhere else in the app yet -- so those
+    // two actions only make sense for the mock rows. Snooze (push the due
+    // date back) is genuinely real: it edits the same invoice object
+    // Invoice Pipeline and Overview read.
+    const draftBtn = i.real ? '' : `<button class="btn sm" ${disabled} onclick="draftScheduledInvoice('${i.id}')">Draft now</button>`;
+    const voidBtn = i.real ? '' : `<button class="btn sm danger" ${disabled} onclick="voidScheduledInvoice('${i.id}')">Void</button>`;
     return `<tr onclick="openScheduledInvoiceDrawer('${i.id}')">
       <td class="mono">${i.dueDate}</td>
-      <td>${i.client}</td>
+      <td>${i.client}${liveChip}</td>
       <td style="font-weight:600">${billTo}</td>
       <td><span style="color:var(--purple-deep);text-decoration:underline dotted" onclick="event.stopPropagation();openDealDrawer('${i.linkedDealId}')">${i.contract}</span></td>
       <td>${i.milestone}</td>
@@ -5244,9 +5297,9 @@ function renderScheduleList(){
       <td>${statusPill(i.status)}</td>
       <td>
         <div class="sch-actions" onclick="event.stopPropagation()">
-          <button class="btn sm" ${disabled} onclick="draftScheduledInvoice('${i.id}')">Draft now</button>
+          ${draftBtn}
           <button class="btn sm" ${disabled} onclick="snoozeScheduledInvoice('${i.id}')">Snooze</button>
-          <button class="btn sm danger" ${disabled} onclick="voidScheduledInvoice('${i.id}')">Void</button>
+          ${voidBtn}
         </div>
       </td>
     </tr>`;
@@ -5261,6 +5314,11 @@ function findScheduled(id){
 }
 
 function draftScheduledInvoice(id){
+  const realInv = findPipelineInvoice(id);
+  if(realInv && realInv.real){
+    toast('warn', realInv.id + ' is already drafted — real invoices are created the moment their deal is approved.');
+    return;
+  }
   const inv = findScheduled(id); if(!inv) return;
   inv.status = 'draft';
   toast('success','Drafted ' + inv.id + ' · ' + money(inv.amount) + ' · ready for approval');
@@ -5268,6 +5326,25 @@ function draftScheduledInvoice(id){
 }
 
 function snoozeScheduledInvoice(id){
+  const realInv = findPipelineInvoice(id);
+  if(realInv && realInv.real){
+    const reason = prompt('Snooze reason (pushes the real invoice\'s due date back 7 days, logged to audit):', 'Client requested delay');
+    if(reason === null) return;
+    const d = parseDate(realInv.dueDate);
+    d.setDate(d.getDate() + 7);
+    realInv.dueDate = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+      AUDIT.unshift({
+        ts: new Date().toISOString(), ev: 'invoice_snoozed', ent: 'invoice', actor: 'Alex Rivera',
+        target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate
+      });
+    }
+    toast('success','Snoozed ' + realInv.id + ' by 7 days · reason logged');
+    renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    renderSchedule();
+    return;
+  }
   const inv = findScheduled(id); if(!inv) return;
   const reason = prompt('Snooze reason (logged to audit trail):', 'Client requested delay');
   if(reason === null) return;
@@ -5279,6 +5356,11 @@ function snoozeScheduledInvoice(id){
 }
 
 function voidScheduledInvoice(id){
+  const realInv = findPipelineInvoice(id);
+  if(realInv && realInv.real){
+    toast('warn', 'Voiding isn\'t supported for real invoices yet');
+    return;
+  }
   const inv = findScheduled(id); if(!inv) return;
   if(!confirm('Void scheduled invoice ' + inv.id + '? This is a soft-void and can be reversed by finance.')) return;
   inv.status = 'voided';
@@ -5325,7 +5407,10 @@ function openScheduledInvoiceDrawer(id){
     ${draftPreview}
     ${contractRow}
   `;
-  const foot = `
+  const foot = inv.real ? `
+    <button class="btn" onclick="closeDrawer()">Close</button>
+    <button class="btn primary" onclick="closeDrawer();goToTab('invpipe');openInvoicePipelineDrawer('${inv.id}')">Open in Invoice Pipeline</button>
+  ` : `
     <button class="btn" onclick="closeDrawer()">Close</button>
     <button class="btn primary" onclick="draftScheduledInvoice('${inv.id}');closeDrawer()">Draft now</button>
   `;
@@ -5333,8 +5418,9 @@ function openScheduledInvoiceDrawer(id){
 }
 
 function openGenerateAheadModal(){
+  const today = _scheduleToday();
   const upcoming = getScheduledInvoices().filter(i => {
-    const d = daysBetween(TODAY_SCH, parseDate(i.dueDate));
+    const d = daysBetween(today, parseDate(i.dueDate));
     return d >= 0 && d <= 14 && i.status === 'scheduled';
   });
   if(upcoming.length === 0){
@@ -5357,8 +5443,9 @@ function openGenerateAheadModal(){
 
 function bulkGenerateAhead(){
   let n = 0;
+  const today = _scheduleToday();
   getScheduledInvoices().forEach(i => {
-    const d = daysBetween(TODAY_SCH, parseDate(i.dueDate));
+    const d = daysBetween(today, parseDate(i.dueDate));
     if(d >= 0 && d <= 14 && i.status === 'scheduled'){
       i.status = 'draft'; n++;
     }
