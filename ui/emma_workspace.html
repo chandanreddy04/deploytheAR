@@ -1928,7 +1928,10 @@ function renderRevMonthlyTable(){
   let rows = getMonthly().map((r,i,arr)=>{
     const prev = i>0 ? arr[i-1] : null;
     const collection = r.invoiced ? (r.paid/r.invoiced)*100 : 0;
-    const mom = prev ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
+    // prev.invoiced can be genuinely 0 with real (sparse) data, not just
+    // "no prior month" -- guard against divide-by-zero -> Infinity%/NaN%,
+    // same as real months with nothing invoiced would otherwise show.
+    const mom = (prev && prev.invoiced) ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
     return {...r, collection, mom, _i:i};
   });
   if(revSortState.key){
@@ -1989,7 +1992,7 @@ function exportRevCsv(){
   const rows = getMonthly().map((r,i,arr)=>{
     const prev = i>0 ? arr[i-1] : null;
     const collection = r.invoiced ? (r.paid/r.invoiced)*100 : 0;
-    const mom = prev ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
+    const mom = (prev && prev.invoiced) ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
     return [r.month, r.invoiced, r.paid, r.outstanding, r.overdue, collection.toFixed(1)+'%', mom==null?'':Math.round(mom)+'%'];
   });
   const header = ['Month','Invoiced','Paid','Outstanding','Overdue','Collection rate','MoM change'];
@@ -5459,6 +5462,37 @@ async function loadRealAging(refresh){
   }
 }
 
+// Real trailing-12-months invoiced/paid/outstanding/overdue, from
+// /api/invoices/monthly -- overwrites RALLY_MONTHLY's contents in place
+// (can't reassign a const, and MONTHLY_DATA.rally already points at this
+// exact array) so the existing chart/table/CSV-export code, which all
+// read from getMonthly() -> MONTHLY_DATA.rally, becomes real automatically
+// with no separate changes needed in any of them.
+async function loadRealMonthly(refresh){
+  try{
+    const res = await fetch('/api/invoices/monthly' + (refresh ? '?refresh=1' : ''));
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    const months = payload.months || [];
+    if(payload.error && !months.length){
+      toast('warn', 'Live monthly revenue unavailable: ' + payload.error);
+      return;
+    }
+    if(!months.length) return;
+    RALLY_MONTHLY.length = 0;
+    RALLY_MONTHLY.push(...months);
+    if(currentClient === 'rally'){
+      renderRevChart();
+      renderRevMonthlyTable();
+    }
+    const totalInvoiced = months.reduce((s,m)=>s+(Number(m.invoiced)||0),0);
+    const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
+    toast(payload.error ? 'warn' : 'success', 'Real trailing-12-months data loaded · ' + money(totalInvoiced) + ' invoiced total' + staleNote);
+  }catch(e){
+    toast('warn', 'Could not reach the live monthly revenue API — is server.py running? (' + e.message + ')');
+  }
+}
+
 // Real-time top-of-page date stamp -- was a fixed "Tuesday, September 15,
 // 2026 · live" that never actually changed despite the "live" label.
 // Ticks every second off the browser's own clock (no API call needed --
@@ -5479,6 +5513,7 @@ loadRealCash(false);
 loadRealCollections(false);
 loadRealDealReconciliation(false);
 loadRealAging(false);
+loadRealMonthly(false);
 </script>
 
 <!-- ================== ASK EMMA CHAT ================== -->

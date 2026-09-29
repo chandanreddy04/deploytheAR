@@ -49,6 +49,7 @@ _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
 _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": None}
 _deal_recon_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _aging_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
+_monthly_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _CACHE_TTL_SECONDS = 300  # re-fetch at most every 5 minutes even without ?refresh=1
 
 # Durable cache instead of the in-memory-only caches above going stale on
@@ -635,6 +636,120 @@ def get_aging_summary(force_refresh: bool = False) -> tuple[dict | None, str | N
     return _aging_cache["data"], _aging_cache["error"]
 
 
+def compute_monthly_summary() -> dict:
+    """Real trailing-12-months invoiced/paid/outstanding/overdue, bucketed
+    by each real invoice/payment's own real QuickBooks date (TxnDate) --
+    no separate history log needed, QuickBooks already carries these dates
+    itself. Scoped to real deal customers, same as everywhere else.
+
+    "Outstanding"/"overdue" for a given month are a current snapshot
+    sliced by which month the invoice was issued, not what the balance
+    looked like back in that month -- there's no historical balance to
+    look up, only the live one QuickBooks has right now. Unlike
+    _real_outstanding_invoices(), this includes fully-paid ($0 balance)
+    invoices too, since "Invoiced"/"Paid" need the complete picture, not
+    just what's still outstanding.
+    """
+    from datetime import date
+
+    from integrations.qbo import QboClient
+
+    settings = load_settings()
+    if settings.qbo_mode != "live":
+        raise RuntimeError("QBO_MODE is not 'live' -- set it in .env to fetch real invoice data")
+
+    deals, _ = get_deals()
+    real_customer_keys = {_normalize_customer_name(d.get("c", "")) for d in deals if d.get("real")}
+    real_customer_keys.discard("")
+
+    client = QboClient(settings)
+    all_invoices = client.list_invoices(limit=50)
+    invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
+    all_payments, _ = client.list_payments_since(None)
+    payments = [p for p in all_payments if _normalize_customer_name(p.customer_name) in real_customer_keys]
+
+    today = date.today()
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    # 12 buckets ending at the current month, oldest first -- same window
+    # shape as the frontend's original fabricated RALLY_MONTHLY data.
+    buckets = []
+    y, m = today.year, today.month
+    for _ in range(12):
+        buckets.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    buckets.reverse()
+    bucket_index = {ym: i for i, ym in enumerate(buckets)}
+
+    months = [
+        {"month": f"{month_names[bm - 1]} {str(by)[-2:]}", "invoiced": 0.0, "paid": 0.0, "outstanding": 0.0, "overdue": 0.0}
+        for (by, bm) in buckets
+    ]
+
+    for inv in invoices:
+        txn_raw = inv.get("TxnDate")
+        if not txn_raw:
+            continue
+        try:
+            txn_date = date.fromisoformat(txn_raw)
+        except ValueError:
+            continue
+        idx = bucket_index.get((txn_date.year, txn_date.month))
+        if idx is None:
+            continue
+        total = float(inv.get("TotalAmt") or 0)
+        balance = float(inv.get("Balance") or 0)
+        months[idx]["invoiced"] += total
+        months[idx]["outstanding"] += balance
+        due_raw = inv.get("DueDate")
+        if balance > 0 and due_raw:
+            try:
+                if date.fromisoformat(due_raw) < today:
+                    months[idx]["overdue"] += balance
+            except ValueError:
+                pass
+
+    for p in payments:
+        if p.voided or not p.txn_date:
+            continue
+        try:
+            txn_date = date.fromisoformat(p.txn_date)
+        except ValueError:
+            continue
+        idx = bucket_index.get((txn_date.year, txn_date.month))
+        if idx is None:
+            continue
+        months[idx]["paid"] += p.total_amount
+
+    for row in months:
+        for key in ("invoiced", "paid", "outstanding", "overdue"):
+            row[key] = round(row[key], 2)
+
+    return {"months": months}
+
+
+def get_monthly_summary(force_refresh: bool = False) -> tuple[dict | None, str | None]:
+    if _monthly_cache["data"] is None and not force_refresh:
+        data, computed_at, error = _db_load("monthly")
+        if data is not None:
+            _monthly_cache["data"], _monthly_cache["computed_at"], _monthly_cache["error"] = data, computed_at, error
+
+    stale = time.time() - _monthly_cache["computed_at"] > _CACHE_TTL_SECONDS
+    if force_refresh or _monthly_cache["data"] is None or stale:
+        try:
+            _monthly_cache["data"] = compute_monthly_summary()
+            _monthly_cache["error"] = None
+        except Exception as exc:
+            _monthly_cache["error"] = str(exc)
+            if _monthly_cache["data"] is None:
+                _monthly_cache["data"] = {"months": []}
+        _monthly_cache["computed_at"] = time.time()
+        _db_save("monthly", _monthly_cache["data"], _monthly_cache["computed_at"], _monthly_cache["error"])
+    return _monthly_cache["data"], _monthly_cache["error"]
+
+
 def compute_collections() -> list[dict]:
     """Real overdue invoices from the QuickBooks sandbox, each paired with a
     draft dunning email built from real invoice/customer data.
@@ -942,6 +1057,12 @@ class Handler(BaseHTTPRequestHandler):
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             summary, error = get_aging_summary(force_refresh=force)
             self._send_json({**summary, "error": error, "computed_at": _aging_cache["computed_at"]})
+            return
+
+        if path == "/api/invoices/monthly":
+            force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
+            summary, error = get_monthly_summary(force_refresh=force)
+            self._send_json({**summary, "error": error, "computed_at": _monthly_cache["computed_at"]})
             return
 
         if path.startswith("/api/deals/") and path.endswith("/pdf"):
