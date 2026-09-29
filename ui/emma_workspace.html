@@ -598,7 +598,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       <div class="ni" data-tab="schedule"><span class="av">S</span><span class="lb">Invoicing schedule</span></div>
       <div class="ni" data-tab="invpipe"><span class="av">I</span><span class="lb">Invoice pipeline</span><span class="badge" id="navInvCount" style="background:var(--slate-bg);color:var(--text-2)">0</span></div>
       <div class="ni" data-tab="cash"><span class="av">Ca</span><span class="lb">Cash application</span></div>
-      <div class="ni" data-tab="collections"><span class="av">Cq</span><span class="lb">Collections queue</span><span class="badge" style="background:var(--amber-bg);color:#8a5a10">12</span></div>
+      <div class="ni" data-tab="collections"><span class="av">Cq</span><span class="lb">Collections queue</span><span class="badge" id="navCollectionsCount" style="background:var(--amber-bg);color:#8a5a10">0</span></div>
       <div class="ni" data-tab="incidents"><span class="av">In</span><span class="lb">Incidents</span><span class="badge">15</span></div>
       <div class="ni" data-tab="audit"><span class="av">Au</span><span class="lb">Audit</span></div>
       <div class="ni" data-tab="config"><span class="av">Cf</span><span class="lb">Config</span></div>
@@ -2582,6 +2582,8 @@ function renderCollections(){
           <div class="kmeta"><span class="amt">${money(c.amt)}</span><span style="color:var(--text-3)">DPD ${c.dpd}</span></div>
         </div>`).join('')}</div></div>`;
   }).join('');
+  const nav = document.getElementById('navCollectionsCount');
+  if(nav) nav.textContent = source.length;
 }
 
 /* =====================================================================
