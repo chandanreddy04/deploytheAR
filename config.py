@@ -110,6 +110,17 @@ def load_settings() -> Settings:
     qbo_refresh_token = _env("QBO_REFRESH_TOKEN")
     qbo_access_token = _env("QBO_ACCESS_TOKEN")
     if qbo_mode == "live":
+        # A rotated refresh token (integrations/qbo.py) is saved to the
+        # database as well as .env -- prefer that if present, since it's
+        # the only copy that survives a restart once deployed (no local
+        # .env file there to rewrite). Import is local: config.py must stay
+        # importable even when db.py's dependencies aren't relevant yet.
+        from db import db_load
+
+        db_token, _, _ = db_load("qbo_refresh_token")
+        if db_token:
+            qbo_refresh_token = db_token
+    if qbo_mode == "live":
         if not qbo_realm_id:
             raise RuntimeError("QBO_MODE=live but QBO_REALM_ID is not set")
         if not qbo_access_token and not (qbo_refresh_token and qbo_client_id and qbo_client_secret):

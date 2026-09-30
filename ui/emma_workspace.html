@@ -101,6 +101,10 @@ a{color:inherit;text-decoration:none}
 /* KPI cards */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow)}
+.kpi.clickable{cursor:pointer;transition:border-color .12s,transform .12s}
+.kpi.clickable:hover{border-color:var(--purple,#6d5ef8)}
+.kpi.clickable:active{transform:scale(0.98)}
+.kpi.clickable.active{border-color:var(--purple,#6d5ef8);box-shadow:0 0 0 1px var(--purple,#6d5ef8)}
 .kpi .l{font-size:11.5px;color:var(--text-2);font-weight:500}
 .kpi .v{font-size:28px;font-weight:700;letter-spacing:-0.4px;margin-top:6px;line-height:1.05}
 .kpi .v.red{color:var(--red)}
@@ -188,6 +192,8 @@ table.t .mono{font-family:var(--mono);font-size:11.5px}
 .brief .stamp{color:var(--text-3);font-size:11px;font-weight:500}
 .brief ul{margin:10px 0 0 24px;padding:0;font-size:13px;color:var(--text-2);line-height:1.7}
 .brief ul li b{color:var(--text)}
+.brief ul li.clickable{cursor:pointer;border-radius:4px;transition:background-color .12s}
+.brief ul li.clickable:hover{background-color:var(--purple-mid);text-decoration:underline;text-decoration-color:var(--purple)}
 
 /* Team of agents */
 .agents-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
@@ -523,6 +529,9 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
 /* Daily reconciliation tiles */
 .recon-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:16px 18px}
 .recon-tile{background:var(--tone-bg,var(--surface-2));border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.recon-tile.clickable{cursor:pointer;transition:box-shadow .12s}
+.recon-tile.clickable:hover{box-shadow:0 0 0 1px var(--tone,var(--purple,#6d5ef8))}
+.recon-tile.clickable:active{transform:scale(0.98)}
 .recon-tile .rt-hd{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2);font-weight:600}
 .recon-tile .rt-ico{width:22px;height:22px;border-radius:50%;background:var(--tone,#666);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .recon-tile .rt-lbl{color:var(--tone,var(--text-2));font-weight:700;letter-spacing:.2px}
@@ -589,7 +598,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       <div class="ni" data-tab="schedule"><span class="av">S</span><span class="lb">Invoicing schedule</span></div>
       <div class="ni" data-tab="invpipe"><span class="av">I</span><span class="lb">Invoice pipeline</span><span class="badge" id="navInvCount" style="background:var(--slate-bg);color:var(--text-2)">0</span></div>
       <div class="ni" data-tab="cash"><span class="av">Ca</span><span class="lb">Cash application</span></div>
-      <div class="ni" data-tab="collections"><span class="av">Cq</span><span class="lb">Collections queue</span><span class="badge" style="background:var(--amber-bg);color:#8a5a10">12</span></div>
+      <div class="ni" data-tab="collections"><span class="av">Cq</span><span class="lb">Collections queue</span><span class="badge" id="navCollectionsCount" style="background:var(--amber-bg);color:#8a5a10">0</span></div>
       <div class="ni" data-tab="incidents"><span class="av">In</span><span class="lb">Incidents</span><span class="badge">15</span></div>
       <div class="ni" data-tab="audit"><span class="av">Au</span><span class="lb">Audit</span></div>
       <div class="ni" data-tab="config"><span class="av">Cf</span><span class="lb">Config</span></div>
@@ -607,7 +616,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         <h1 class="title">Emma · Revenue Cycle Coworker · Rally UXR</h1>
         <div class="subtitle" id="pageSubtitle">Emma sits above your invoicing tool (Ramp, bill.com, Chargebee, Stripe) and orchestrates the deal-to-cash workflow across HubSpot, QuickBooks, and your finance inbox.</div>
       </div>
-      <div class="right"><span class="live-dot"></span> Tuesday, September 15, 2026 · live</div>
+      <div class="right"><span class="live-dot"></span> <span id="topDateStamp">Tuesday, September 15, 2026 · live</span></div>
     </div>
 
     <div class="content">
@@ -635,6 +644,19 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
           <div class="l">Decisions waiting on you</div>
           <div class="v red" id="kpiDecisions">5</div>
           <div class="meta" id="kpiDecisionsMeta">1 approval · 2 unmatched · 1 dispute · 1 writeoff</div>
+        </div>
+      </div>
+
+      <!-- Real AR aging summary -- hidden until real data loads (Overview
+           Phase 4), same pattern as Cash Application's dealReconSection. -->
+      <div class="section" id="agingSummarySection" style="display:none">
+        <div class="sh">
+          <h3>AR aging</h3>
+          <span class="desc">· real outstanding invoices, by days overdue</span>
+          <div class="right"><span class="pill green dot" style="font-size:9.5px">Live</span></div>
+        </div>
+        <div class="body">
+          <div class="kpis" id="agingBuckets" style="grid-template-columns:repeat(5,1fr)"></div>
         </div>
       </div>
 
@@ -728,26 +750,26 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
           <div class="agents-strip">
             <div class="agent-pill clickable" onclick="goToTab('pipeline')">
               <div class="hd"><span class="led live"></span><span class="nm">HubSpot Sync</span></div>
-              <div class="lr">Last run 2 min ago</div>
-              <div class="inc">3 events today · 0 incidents</div>
+              <div class="lr" id="agentHubspotLr">Last run 2 min ago</div>
+              <div class="inc" id="agentHubspotInc">3 events today · 0 incidents</div>
               <a class="op" onclick="event.stopPropagation();goToTab('pipeline')">Open →</a>
             </div>
             <div class="agent-pill clickable" onclick="goToTab('invpipe')">
               <div class="hd"><span class="led live"></span><span class="nm">Invoicing</span></div>
-              <div class="lr">Last run 14 min ago</div>
-              <div class="inc">3 invoices drafted · 1 held for approval</div>
+              <div class="lr" id="agentInvoicingLr">Last run 14 min ago</div>
+              <div class="inc" id="agentInvoicingInc">3 invoices drafted · 1 held for approval</div>
               <a class="op" onclick="event.stopPropagation();goToTab('invpipe')">Open →</a>
             </div>
             <div class="agent-pill clickable" onclick="goToTab('cash')">
               <div class="hd"><span class="led live"></span><span class="nm">Cash Application</span></div>
-              <div class="lr">Last run 6 min ago</div>
-              <div class="inc">7 applied · 2 unmatched</div>
+              <div class="lr" id="agentCashLr">Last run 6 min ago</div>
+              <div class="inc" id="agentCashInc">7 applied · 2 unmatched</div>
               <a class="op" onclick="event.stopPropagation();goToTab('cash')">Open →</a>
             </div>
             <div class="agent-pill clickable" onclick="goToTab('collections')">
               <div class="hd"><span class="led live"></span><span class="nm">AR Collections</span></div>
-              <div class="lr">Last run 1 hr ago</div>
-              <div class="inc">4 first-notices sent · 1 dispute paused</div>
+              <div class="lr" id="agentCollectionsLr">Last run 1 hr ago</div>
+              <div class="inc" id="agentCollectionsInc">4 first-notices sent · 1 dispute paused</div>
               <a class="op" onclick="event.stopPropagation();goToTab('collections')">Open →</a>
             </div>
             <div class="agent-pill roadmap">
@@ -794,9 +816,9 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       </div>
 
       <div class="kpis" id="dealReviewKpis">
-        <div class="kpi"><div class="l">Awaiting review</div><div class="v" id="drKpiAwait">0</div><div class="meta" id="drKpiAwaitMeta">Freshly parsed, ready for you</div></div>
-        <div class="kpi"><div class="l">Approved this week</div><div class="v" id="drKpiApproved">0</div><div class="meta" id="drKpiApprovedMeta">Flowed to invoicing schedule</div></div>
-        <div class="kpi"><div class="l">Failed extraction</div><div class="v red" id="drKpiFailed">0</div><div class="meta" id="drKpiFailedMeta">Parser could not read terms</div></div>
+        <div class="kpi clickable" data-drfilter="awaiting" role="button" tabindex="0"><div class="l">Awaiting review</div><div class="v" id="drKpiAwait">0</div><div class="meta" id="drKpiAwaitMeta">Freshly parsed, ready for you</div></div>
+        <div class="kpi clickable" data-drfilter="approved" role="button" tabindex="0"><div class="l">Approved this week</div><div class="v" id="drKpiApproved">0</div><div class="meta" id="drKpiApprovedMeta">Flowed to invoicing schedule</div></div>
+        <div class="kpi clickable" data-drfilter="failed" role="button" tabindex="0"><div class="l">Failed extraction</div><div class="v red" id="drKpiFailed">0</div><div class="meta" id="drKpiFailedMeta">Parser could not read terms</div></div>
         <div class="kpi"><div class="l">Avg time-to-review</div><div class="v" id="drKpiAvg">12<span style="font-size:14px;color:var(--text-2);font-weight:500"> min</span></div><div class="meta">Trailing 30 days</div></div>
       </div>
 
@@ -968,9 +990,9 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
     <!-- ============= COLLECTIONS QUEUE ============= -->
     <section class="screen" id="scr-collections">
       <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
-        <div class="kpi"><div class="l">Total overdue</div><div class="v" id="collKpiTotal">—</div><div class="meta" id="collKpiTotalMeta">—</div></div>
-        <div class="kpi"><div class="l">Avg DPD</div><div class="v"><span id="collKpiAvgDpd">—</span><span style="font-size:14px;color:var(--text-2);font-weight:500"> days</span></div><div class="meta" id="collKpiAvgDpdMeta">—</div></div>
-        <div class="kpi"><div class="l">Disputes paused</div><div class="v" id="collKpiPaused">—</div><div class="meta" id="collKpiPausedMeta">—</div></div>
+        <div class="kpi clickable" onclick="scrollToSection('kanban-collections')" role="button" tabindex="0"><div class="l">Total overdue</div><div class="v" id="collKpiTotal">—</div><div class="meta" id="collKpiTotalMeta">—</div></div>
+        <div class="kpi clickable" onclick="scrollToSection('kanban-collections')" role="button" tabindex="0"><div class="l">Avg DPD</div><div class="v"><span id="collKpiAvgDpd">—</span><span style="font-size:14px;color:var(--text-2);font-weight:500"> days</span></div><div class="meta" id="collKpiAvgDpdMeta">—</div></div>
+        <div class="kpi clickable" onclick="scrollToSection('kanban-collections')" role="button" tabindex="0"><div class="l">Disputes paused</div><div class="v" id="collKpiPaused">—</div><div class="meta" id="collKpiPausedMeta">—</div></div>
       </div>
       <div class="section">
         <div class="sh">
@@ -1459,6 +1481,16 @@ function nowStamp(mOffset=0){
   return `2026-09-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+// Same "YYYY-MM-DD HH:MM:SS" shape as nowStamp() -- so real audit rows sit
+// visually consistent next to the fabricated demo ones -- but built from
+// the actual current time instead of the fixed fictional Sept 15 2026
+// clock, for AUDIT entries logged from genuinely real actions.
+function _realNowStamp(){
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 const AUDIT = [
   {ts:nowStamp(2),  ev:'invoice_awaiting_approval', ent:'invoice',actor:'Emma',target:'INV-2026-09-1204', rationale:'Amount $47K > $5K auto-approve threshold'},
   {ts:nowStamp(8),  ev:'invoice_created',           ent:'invoice',actor:'Emma',target:'INV-2026-09-1204', rationale:'Generated from HS-9128 · Acme Corp'},
@@ -1601,7 +1633,12 @@ function getDeals(){
   if(currentClient==='trade')   return TRADE_DEALS;
   if(currentClient==='halcyon') return HALCYON_DEALS;
   if(currentClient==='all')     return DEALS.concat(TRADE_DEALS, HALCYON_DEALS);
-  return DEALS;
+  // Real deals only, same as Cash Application/Collections -- DEALS still
+  // carries its original demo cards underneath the real ones
+  // loadRealDeals() unshifts in, but the Deal Pipeline tiles and table
+  // should only ever reflect real HubSpot deals, not this page's own
+  // pre-existing demo cards.
+  return DEALS.filter(d=>d.real);
 }
 function getApprovals(){
   if(currentClient==='trade')   return TRADE_APPROVALS;
@@ -1901,7 +1938,10 @@ function renderRevMonthlyTable(){
   let rows = getMonthly().map((r,i,arr)=>{
     const prev = i>0 ? arr[i-1] : null;
     const collection = r.invoiced ? (r.paid/r.invoiced)*100 : 0;
-    const mom = prev ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
+    // prev.invoiced can be genuinely 0 with real (sparse) data, not just
+    // "no prior month" -- guard against divide-by-zero -> Infinity%/NaN%,
+    // same as real months with nothing invoiced would otherwise show.
+    const mom = (prev && prev.invoiced) ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
     return {...r, collection, mom, _i:i};
   });
   if(revSortState.key){
@@ -1962,7 +2002,7 @@ function exportRevCsv(){
   const rows = getMonthly().map((r,i,arr)=>{
     const prev = i>0 ? arr[i-1] : null;
     const collection = r.invoiced ? (r.paid/r.invoiced)*100 : 0;
-    const mom = prev ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
+    const mom = (prev && prev.invoiced) ? ((r.invoiced-prev.invoiced)/prev.invoiced)*100 : null;
     return [r.month, r.invoiced, r.paid, r.outstanding, r.overdue, collection.toFixed(1)+'%', mom==null?'':Math.round(mom)+'%'];
   });
   const header = ['Month','Invoiced','Paid','Outstanding','Overdue','Collection rate','MoM change'];
@@ -2081,14 +2121,32 @@ function renderPipeline(){
   if(nav) nav.textContent = awaitCount + failedCount;
 }
 
+// Sets the Deal Pipeline status filter and keeps the filter chips + the
+// clickable KPI tiles above the table in sync with each other, whichever
+// one was actually clicked -- both are just two entry points to the same
+// dealReviewFilter state.
+function setDealReviewFilter(key){
+  dealReviewFilter = key || 'all';
+  document.querySelectorAll('#dealReviewChips .sch-chip').forEach(x=>x.classList.toggle('active', x.dataset.drfilter===dealReviewFilter));
+  document.querySelectorAll('#dealReviewKpis .kpi.clickable').forEach(x=>x.classList.toggle('active', x.dataset.drfilter===dealReviewFilter));
+  renderPipeline();
+  const table = document.getElementById('tbl-deal-review');
+  if(table) table.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
 // Filter chip handler
 document.addEventListener('click', function(e){
-  const btn = e.target.closest('#dealReviewChips .sch-chip');
-  if(!btn) return;
-  document.querySelectorAll('#dealReviewChips .sch-chip').forEach(x=>x.classList.remove('active'));
-  btn.classList.add('active');
-  dealReviewFilter = btn.dataset.drfilter || 'all';
-  renderPipeline();
+  const chip = e.target.closest('#dealReviewChips .sch-chip');
+  if(chip){ setDealReviewFilter(chip.dataset.drfilter); return; }
+  const tile = e.target.closest('#dealReviewKpis .kpi.clickable');
+  if(tile){ setDealReviewFilter(tile.dataset.drfilter); return; }
+});
+document.addEventListener('keydown', function(e){
+  if(e.key !== 'Enter' && e.key !== ' ') return;
+  const tile = e.target.closest && e.target.closest('#dealReviewKpis .kpi.clickable');
+  if(!tile) return;
+  e.preventDefault();
+  setDealReviewFilter(tile.dataset.drfilter);
 });
 
 function _dueDateFromTerms(terms){
@@ -2238,13 +2296,15 @@ async function sendRealInvoiceEmail(invId){
     inv.sentTo = payload.to;
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
-        ts: (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
+        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
         ev: 'invoice_sent', ent: 'invoice', actor: 'Alex Rivera',
         target: inv.id, rationale: 'Emailed to ' + payload.to
       });
     }
     renderInvoicePipeline();
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
     closeDrawer();
     toast('success', inv.id + ' emailed to ' + payload.to);
   }catch(e){
@@ -2261,7 +2321,7 @@ function approveDeal(id){
     const first = invs[0];
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
-        ts: (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
+        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
         ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
         target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
           ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
@@ -2270,6 +2330,10 @@ function approveDeal(id){
     }
     renderPipeline();
     renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
+    if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
+    if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
     const msg = invs.length > 1
       ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
       : `Approved · ${first.id} created from contract, staged in Draft`;
@@ -2396,7 +2460,7 @@ function saveDealEdits(id){
 
   if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
     AUDIT.unshift({
-      ts: (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
+      ts: d.real ? _realNowStamp() : (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
       ev: 'deal_terms_edited',
       ent: 'deal',
       actor: 'Alex Rivera',
@@ -2528,6 +2592,8 @@ function renderCollections(){
           <div class="kmeta"><span class="amt">${money(c.amt)}</span><span style="color:var(--text-3)">DPD ${c.dpd}</span></div>
         </div>`).join('')}</div></div>`;
   }).join('');
+  const nav = document.getElementById('navCollectionsCount');
+  if(nav) nav.textContent = source.length;
 }
 
 /* =====================================================================
@@ -2579,10 +2645,16 @@ const INVOICE_PIPELINE = {
 };
 
 function getInvoicePipeline(){
-  if(currentClient==='rally')   return INVOICE_PIPELINE.rally.slice();
   if(currentClient==='trade')   return INVOICE_PIPELINE.trade.slice();
   if(currentClient==='halcyon') return INVOICE_PIPELINE.halcyon.slice();
-  return INVOICE_PIPELINE.rally.concat(INVOICE_PIPELINE.trade, INVOICE_PIPELINE.halcyon);
+  if(currentClient==='all')     return INVOICE_PIPELINE.rally.filter(i=>i.real).concat(INVOICE_PIPELINE.trade, INVOICE_PIPELINE.halcyon);
+  // Real invoices only, same as Deal Pipeline/Cash Application/Collections
+  // -- INVOICE_PIPELINE.rally still carries its original demo cards
+  // underneath the real ones createOrUpdateInvoiceFromDeal() unshifts in,
+  // but the Invoice Pipeline board should only ever reflect invoices
+  // drafted from a real approved HubSpot deal, not this page's own
+  // pre-existing demo cards.
+  return INVOICE_PIPELINE.rally.filter(i=>i.real);
 }
 
 function findPipelineInvoice(id){
@@ -4201,6 +4273,16 @@ function _computeReconData(){
   return {invAmt, invCnt:invoiced.length, payAmt:paidAmt, payCnt:invoiced.length, glAmt:paidAmt, glCnt:invoiced.length, varianceRows};
 }
 
+// Scroll-only tile click: Cash Application and Collections don't have a
+// filter-chip system the way Deal Pipeline does -- their tables already
+// show every real row with nothing hidden, so there's no distinct
+// subset for a tile click to filter down to. This just jumps the page
+// to the relevant section instead, as a navigation shortcut.
+function scrollToSection(id){
+  const el = document.getElementById(id);
+  if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
 function renderReconTiles(){
   const wrap = document.getElementById('reconTiles');
   if(!wrap) return;
@@ -4217,17 +4299,17 @@ function renderReconTiles(){
     ? payCnt+' invoiced deal'+(payCnt===1?'':'s')+(variance!==0?' · '+money(variance)+' still outstanding':' · fully collected')
     : payCnt+' payments · mismatch '+money(variance);
   wrap.innerHTML = `
-    <div class="recon-tile" style="--tone:#0d6b2c;--tone-bg:var(--green-bg)">
+    <div class="recon-tile clickable" onclick="scrollToSection('dealReconSection')" style="--tone:#0d6b2c;--tone-bg:var(--green-bg)">
       <div class="rt-hd"><span class="rt-ico">✓</span><span class="rt-lbl">Invoices sent${liveTag}</span></div>
       <div class="rt-v">${money(invAmt)}</div>
       <div class="rt-meta">${invMeta}</div>
     </div>
-    <div class="recon-tile" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
+    <div class="recon-tile clickable" onclick="scrollToSection('dealReconSection')" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
       <div class="rt-hd"><span class="rt-ico">!</span><span class="rt-lbl">Payments received${liveTag}</span></div>
       <div class="rt-v">${money(payAmt)}</div>
       <div class="rt-meta">${payMeta}</div>
     </div>
-    <div class="recon-tile" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
+    <div class="recon-tile clickable" onclick="scrollToSection('dealReconSection')" style="--tone:#8a5a10;--tone-bg:var(--amber-bg)">
       <div class="rt-hd"><span class="rt-ico">!</span><span class="rt-lbl">Cash applied${real?' (QuickBooks)':' to GL'}${liveTag}</span></div>
       <div class="rt-v">${money(glAmt)}</div>
       <div class="rt-meta">${glCnt} real deal${glCnt===1?'':'s'}${real?' reconciled against QuickBooks':' · matches payments received'}</div>
@@ -4551,6 +4633,16 @@ const CLIENT_PROFILES = {
 
 let currentMode = 'direct';
 let currentClient = 'rally';
+// Real reminders actually sent this session (Run reminder cycle) -- not
+// persisted, just so the Morning brief can mention it happened without a
+// page reload. Cleared on refresh, same lifetime as every other
+// client-side-only real-data array in this file.
+let SENT_REMINDERS_THIS_SESSION = [];
+// Real computed_at timestamps (unix seconds) from each real endpoint's own
+// response -- captured by loadRealDeals()/loadRealCash()/loadRealCollections()
+// so the Team of agents cards can show a genuine "last run" time instead of
+// a fixed fake one.
+let REAL_COMPUTED_AT = {deals: null, cash: null, collections: null, invoicing: null};
 
 function applyClient(){
   const p = CLIENT_PROFILES[currentClient];
@@ -4575,6 +4667,325 @@ function applyClient(){
   renderAudit();
   renderRevenueSection();
   renderSchedule();
+}
+
+// Phase 1 (Overview real-data rework): overlays a real deal count/value/
+// review-status breakdown onto the "Deals closed 7d" tile once real deals
+// have loaded, replacing CLIENT_PROFILES' fabricated numbers. Only for the
+// primary/real client view -- applyClient() only ever runs once at init,
+// before this, so there's no later re-run that could stomp on it.
+function applyRealOverviewKpis(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  if(!realDeals.length) return;
+
+  const totalValue = realDeals.reduce((s,d)=>s+(Number(d.amt)||0), 0);
+  const awaiting = realDeals.filter(d=>dealReviewStatus(d).key==='awaiting').length;
+  const approved = realDeals.filter(d=>dealReviewStatus(d).key==='approved').length;
+  const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed').length;
+
+  const labelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(1) .l');
+  if(labelEl) labelEl.textContent = 'Real deals';
+  const dealsEl = document.getElementById('kpiDeals');
+  if(dealsEl) dealsEl.innerHTML = realDeals.length + ' <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const metaParts = [money(totalValue) + ' total value', awaiting + ' awaiting review'];
+  if(approved) metaParts.push(approved + ' approved');
+  if(failed) metaParts.push(failed + ' failed extraction');
+  const metaEl = document.getElementById('kpiDealsMeta');
+  if(metaEl) metaEl.textContent = metaParts.join(' · ');
+}
+
+// Phase 2 (Overview real-data rework): overlays real collection rate and
+// outstanding balance onto the "Invoices sent 7d" / "Avg days-to-cash"
+// tiles once real deal reconciliation data has loaded. Same real
+// deal-vs-QuickBooks numbers the Cash Application page's Daily
+// reconciliation tiles already show -- one source of truth
+// (DEAL_RECON), just summarized differently here.
+function applyRealOverviewCollectionKpis(){
+  if(currentClient !== 'rally') return;
+  const invoiced = (DEAL_RECON || []).filter(d=>d.status!=='not_invoiced');
+  if(!invoiced.length) return;
+
+  const totalInvoiced = invoiced.reduce((s,d)=>s+(Number(d.qboTotal)||0), 0);
+  const totalOutstanding = invoiced.reduce((s,d)=>s+(Number(d.qboBalance)||0), 0);
+  const totalCollected = totalInvoiced - totalOutstanding;
+  const rate = totalInvoiced ? Math.round((totalCollected / totalInvoiced) * 100) : 0;
+  const outstandingCount = invoiced.filter(d=>(Number(d.qboBalance)||0) > 0).length;
+
+  const invLabelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(2) .l');
+  if(invLabelEl) invLabelEl.textContent = 'Collection rate';
+  const invEl = document.getElementById('kpiInvoices');
+  if(invEl) invEl.innerHTML = rate + '% <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const invMetaEl = document.getElementById('kpiInvoicesMeta');
+  if(invMetaEl) invMetaEl.textContent = money(totalCollected) + ' of ' + money(totalInvoiced) + ' collected';
+
+  const dtcLabelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(3) .l');
+  if(dtcLabelEl) dtcLabelEl.textContent = 'Outstanding balance';
+  const dtcEl = document.getElementById('kpiDTC');
+  if(dtcEl) dtcEl.innerHTML = money(totalOutstanding) + ' <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const dtcMetaEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(3) .meta');
+  if(dtcMetaEl) dtcMetaEl.textContent = outstandingCount + ' real deal' + (outstandingCount===1?'':'s') + ' with a balance due';
+}
+
+// Phase 3 (Overview real-data rework): overlays a real "needs your
+// attention" rollup onto the "Decisions waiting on you" tile -- real
+// deals awaiting review or failed extraction (DEALS) plus real invoices
+// genuinely overdue (COLLECTIONS, dpd > 0 -- excludes the pre-due window,
+// since "not due yet" isn't something needing attention right now).
+// Called from both loadRealDeals() and loadRealCollections(), since
+// either can finish first; each call just recomputes from whatever's
+// currently in both global arrays.
+function applyRealOverviewAttentionKpi(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  const realCollections = COLLECTIONS.filter(c=>c.real);
+  if(!realDeals.length && !realCollections.length) return;
+
+  const awaiting = realDeals.filter(d=>dealReviewStatus(d).key==='awaiting').length;
+  const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed').length;
+  const overdue = realCollections.filter(c=>(Number(c.dpd)||0) > 0).length;
+  const total = awaiting + failed + overdue;
+
+  const labelEl = document.querySelector('#scr-overview .kpis .kpi:nth-child(4) .l');
+  if(labelEl) labelEl.textContent = 'Needs your attention';
+  const el = document.getElementById('kpiDecisions');
+  if(el) el.innerHTML = total + ' <span class="pill green dot" style="font-size:9.5px;vertical-align:2px">Live</span>';
+  const metaParts = [];
+  if(awaiting) metaParts.push(awaiting + ' deal' + (awaiting===1?'':'s') + ' awaiting review');
+  if(overdue) metaParts.push(overdue + ' invoice' + (overdue===1?'':'s') + ' overdue');
+  if(failed) metaParts.push(failed + ' failed extraction' + (failed===1?'':'s'));
+  const metaEl = document.getElementById('kpiDecisionsMeta');
+  if(metaEl) metaEl.textContent = metaParts.length ? metaParts.join(' · ') : 'Nothing needs your attention right now';
+}
+
+// Morning brief, made real and interactive: composes real bullet points
+// from whatever real data has loaded so far (DEALS, COLLECTIONS,
+// DEAL_RECON, SENT_REMINDERS_THIS_SESSION) instead of CLIENT_PROFILES'
+// fixed strings, and each bullet is clickable -- goToTab() to the real
+// screen that data came from, same navigation function the sidebar
+// itself uses. Called from loadRealDeals()/loadRealCollections()/
+// loadRealDealReconciliation()/runReminderCycle(), since any of those
+// finishing (or a real send happening) changes what the brief should say.
+function applyRealMorningBrief(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  const realCollections = COLLECTIONS.filter(c=>c.real);
+  const invoiced = (DEAL_RECON || []).filter(d=>d.status!=='not_invoiced');
+  if(!realDeals.length && !realCollections.length && !invoiced.length && !SENT_REMINDERS_THIS_SESSION.length) return;
+
+  const awaiting = realDeals.filter(d=>dealReviewStatus(d).key==='awaiting');
+  const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed');
+  const overdue = realCollections.filter(c=>(Number(c.dpd)||0) > 0).sort((a,b)=>(b.dpd||0)-(a.dpd||0));
+  const unpaid = invoiced.filter(d=>d.status==='unpaid');
+  const partial = invoiced.filter(d=>d.status==='partial');
+  const paid = invoiced.filter(d=>d.status==='paid');
+
+  const bullets = [];
+  if(awaiting.length){
+    bullets.push({tab:'pipeline', html:'<b>' + awaiting.length + ' real deal' + (awaiting.length===1?'':'s') + '</b> awaiting your review: ' + awaiting.map(d=>esc(d.c)).join(', ') + '.'});
+  }
+  if(failed.length){
+    bullets.push({tab:'pipeline', html:'<b>' + failed.length + ' real deal' + (failed.length===1?'':'s') + '</b> failed contract extraction and need' + (failed.length===1?'s':'') + ' a look.'});
+  }
+  if(overdue.length){
+    const worst = overdue[0];
+    bullets.push({tab:'collections', html:'<b>' + overdue.length + ' real invoice' + (overdue.length===1?'':'s') + '</b> currently overdue — ' + esc(worst.c) + ' is the furthest, ' + worst.dpd + ' days.'});
+  }
+  if(unpaid.length){
+    const total = unpaid.reduce((s,d)=>s+(Number(d.qboBalance)||0),0);
+    bullets.push({tab:'cash', html:'<b>' + unpaid.length + ' real deal' + (unpaid.length===1?'':'s') + '</b> fully unpaid in QuickBooks (' + money(total) + '): ' + unpaid.map(d=>esc(d.c)).join(', ') + '.'});
+  }
+  if(partial.length){
+    const outstanding = partial.reduce((s,d)=>s+(Number(d.qboBalance)||0),0);
+    bullets.push({tab:'cash', html:'<b>' + partial.length + ' real deal' + (partial.length===1?'':'s') + '</b> partially paid — ' + money(outstanding) + ' still outstanding.'});
+  }
+  if(paid.length){
+    bullets.push({tab:'cash', html:'<b>' + paid.length + ' real deal' + (paid.length===1?'':'s') + '</b> fully paid in QuickBooks.'});
+  }
+  if(SENT_REMINDERS_THIS_SESSION.length){
+    bullets.push({tab:'collections', html:'<b>' + SENT_REMINDERS_THIS_SESSION.length + ' real reminder email' + (SENT_REMINDERS_THIS_SESSION.length===1?'':'s') + '</b> sent this session via Run reminder cycle.'});
+  }
+
+  const headerEl = document.querySelector('.brief h3');
+  const stampEl = document.getElementById('briefStamp');
+  const listEl = document.getElementById('briefList');
+  if(!listEl) return;
+
+  const now = new Date();
+  const dateStr = now.toLocaleDateString(undefined, {weekday:'long', month:'short', day:'numeric'});
+  const timeStr = now.toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit'});
+  if(headerEl) headerEl.innerHTML = '<span class="av">E</span> Morning brief · ' + dateStr + ' · ' + timeStr + ' <span class="pill green dot" style="font-size:9.5px;margin-left:2px">Live</span>';
+  if(stampEl) stampEl.textContent = 'Generated just now from real HubSpot + QuickBooks data · Rally UXR · click a line to open it';
+
+  listEl.innerHTML = bullets.length
+    ? bullets.map(b=>`<li class="clickable" onclick="goToTab('${b.tab}')">${b.html}</li>`).join('')
+    : '<li>Nothing needs your attention right now — all real deals and invoices are on track.</li>';
+}
+
+// Real "Renewals coming up": contract term-end date (signed_date +
+// termMonths, both already extracted per real deal -- no new API call
+// needed) falling within the next 90 days. Unlike the mock RENEWALS
+// array, there's no real renewal workflow anywhere in this app to
+// report on, so status is honestly limited to what the contract's own
+// autoRenew field says (true/false/not stated) -- never a fabricated
+// action like "drafted" or "notified sales".
+function applyRealRenewals(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real && d.termMonths && d.contract && d.contract.signed_date);
+  if(!realDeals.length) return;
+
+  const today = new Date();
+  const rows = [];
+  for(const d of realDeals){
+    const signedDate = new Date(d.contract.signed_date);
+    if(isNaN(signedDate.getTime())) continue;
+    const signedISO = signedDate.toISOString().slice(0,10);
+    const termEnd = new Date(_addMonths(signedISO, d.termMonths) + 'T00:00:00');
+    const daysUntil = Math.round((termEnd - today) / 86400000);
+    if(daysUntil < 0 || daysUntil > 90) continue;
+    let status, tone;
+    if(d.autoRenew === true){ status = 'Auto-renews'; tone = 'green'; }
+    else if(d.autoRenew === false){ status = 'Manual renewal needed'; tone = 'amber'; }
+    else { status = 'Not stated in contract'; tone = 'slate'; }
+    rows.push({id:d.id, c:d.c, contract:(d.contract.filename || 'Contract'), val:d.amt, days:daysUntil, status, tone});
+  }
+  rows.sort((a,b)=>a.days-b.days);
+
+  const tbody = document.getElementById('renewalsBody');
+  const stat = document.getElementById('renewalsStat');
+  if(!tbody) return;
+
+  const liveTag = ' <span class="pill green dot" style="font-size:9.5px">Live</span>';
+  if(!rows.length){
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No real deals have a contract term ending in the next 90 days</td></tr>';
+    if(stat) stat.innerHTML = '·' + liveTag + ' 0 real contracts expire in 90 days';
+    return;
+  }
+  const total = rows.reduce((s,r)=>s+(Number(r.val)||0),0);
+  if(stat) stat.innerHTML = '·' + liveTag + ' <b>' + rows.length + ' real contract' + (rows.length===1?'':'s') + '</b> totaling <b>' + money(total) + '</b> expire in 90 days';
+  tbody.innerHTML = rows.map(r=>`<tr onclick="openDealDrawer('${r.id}')">
+    <td>${esc(r.c)} <span class="pill green dot" style="font-size:9px;margin-left:4px">Live</span></td>
+    <td style="font-size:12px;color:var(--text-2)">${esc(r.contract)}</td>
+    <td class="amt-cell">${money(r.val)}</td>
+    <td class="num">${r.days}</td>
+    <td><span class="pill ${r.tone} dot">${esc(r.status)}</span></td>
+  </tr>`).join('');
+}
+
+// Real "Scheduled invoices": future installments of REAL invoices Phase 1
+// already generates when a real deal is approved (INVOICE_PIPELINE.rally,
+// real:true entries) -- not real QuickBooks invoices. That option was
+// deliberately rejected earlier as redundant with Collections and for
+// mixing already-paid items into a "coming up" list. This matches the
+// section's own subtitle ("Emma will draft each on its due date")
+// literally -- these are exactly the invoices Emma has already drafted
+// (client-side, per the read-only-QBO rule) and hasn't sent yet.
+// Genuinely empty until a real deal with a recurring/upcoming schedule
+// gets approved -- honest, not a bug.
+function applyRealScheduledInvoices(){
+  if(currentClient !== 'rally') return;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const horizon = new Date(today); horizon.setDate(horizon.getDate() + 90);
+  const stageLabel = s => s==='draft' ? 'Draft' : s==='sent' ? 'Sent'
+    : s==='approval' ? 'Awaiting approval' : s==='scheduled' ? 'Scheduled'
+    : (s ? s[0].toUpperCase()+s.slice(1) : 'Scheduled');
+
+  const rows = [];
+  for(const inv of INVOICE_PIPELINE.rally){
+    if(!inv.real || inv.stage === 'paid' || !inv.dueDate) continue;
+    const d = new Date(inv.dueDate + 'T00:00:00');
+    if(isNaN(d.getTime()) || d < today || d > horizon) continue;
+    rows.push({due: inv.dueDate, client: inv.customer || inv.client, contract: inv.ctag, milestone: inv.milestone, amount: inv.amount, status: stageLabel(inv.stage)});
+  }
+  rows.sort((a,b) => a.due.localeCompare(b.due));
+
+  RALLY_FORWARD.length = 0;
+  RALLY_FORWARD.push(...rows);
+  if(currentClient === 'rally') renderRevForecast();
+
+  if(!rows.length){
+    const tbody = document.querySelector('#tbl-rev-forecast tbody');
+    const lbl = document.getElementById('revForecastLbl');
+    const val = document.getElementById('revForecastVal');
+    if(tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty">No real invoices scheduled in the next 90 days — approve a real deal to see its upcoming installments here</td></tr>';
+    if(lbl) lbl.textContent = 'Forecast: $0 across 0 real invoices in next 90 days';
+    if(val) val.textContent = '$0K';
+  }
+}
+
+function _timeAgo(unixSeconds){
+  if(!unixSeconds) return 'Not run yet';
+  const diffSec = Math.max(0, (Date.now()/1000) - unixSeconds);
+  if(diffSec < 60) return 'Last run just now';
+  const min = Math.round(diffSec/60);
+  if(min < 60) return 'Last run ' + min + ' min ago';
+  const hr = Math.round(min/60);
+  if(hr < 24) return 'Last run ' + hr + ' hr ago';
+  const days = Math.round(hr/24);
+  return 'Last run ' + days + ' day' + (days===1?'':'s') + ' ago';
+}
+
+// Real "Team of agents" cards -- each of the 4 "live" cards (HubSpot Sync/
+// Invoicing/Cash Application/AR Collections) already navigates to a real
+// screen on click; only their text was ever fake. "Portal Upload"/
+// "Contract Parser" are left untouched -- they're honestly labeled "Phase
+// 2 roadmap" already, not something with real data to surface.
+function applyRealAgentCards(){
+  if(currentClient !== 'rally') return;
+  const realDeals = DEALS.filter(d=>d.real);
+  const realInvoices = INVOICE_PIPELINE.rally.filter(i=>i.real);
+  const realMatched = CASH_MATCHED.filter(c=>c.real);
+  const realPartial = CASH_PARTIAL.filter(c=>c.real);
+  const realUnmatched = CASH_UNMATCHED.filter(c=>c.real);
+  const realCollections = COLLECTIONS.filter(c=>c.real);
+
+  {
+    const lr = document.getElementById('agentHubspotLr');
+    const inc = document.getElementById('agentHubspotInc');
+    if(realDeals.length){
+      const failed = realDeals.filter(d=>dealReviewStatus(d).key==='failed').length;
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.deals);
+      if(inc) inc.textContent = realDeals.length + ' real deal' + (realDeals.length===1?'':'s') + ' synced · ' + failed + ' incident' + (failed===1?'':'s');
+    } else {
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.deals);
+      if(inc) inc.textContent = 'No real deals synced yet';
+    }
+  }
+
+  {
+    const drafted = realInvoices.filter(i=>i.stage==='draft').length;
+    const held = realInvoices.filter(i=>i.stage==='approval').length;
+    const lr = document.getElementById('agentInvoicingLr');
+    const inc = document.getElementById('agentInvoicingInc');
+    if(realInvoices.length){
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.invoicing);
+      if(inc) inc.textContent = drafted + ' real invoice' + (drafted===1?'':'s') + ' drafted · ' + held + ' held for approval';
+    } else {
+      if(lr) lr.textContent = 'Not run yet';
+      if(inc) inc.textContent = 'No real invoices drafted yet';
+    }
+  }
+
+  {
+    const applied = realMatched.length + realPartial.length;
+    const lr = document.getElementById('agentCashLr');
+    const inc = document.getElementById('agentCashInc');
+    if(realMatched.length || realPartial.length || realUnmatched.length){
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.cash);
+      if(inc) inc.textContent = applied + ' real applied · ' + realUnmatched.length + ' unmatched';
+    } else {
+      if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.cash);
+      if(inc) inc.textContent = 'No real cash activity yet';
+    }
+  }
+
+  {
+    const overdue = realCollections.filter(c=>(Number(c.dpd)||0) > 0).length;
+    const lr = document.getElementById('agentCollectionsLr');
+    const inc = document.getElementById('agentCollectionsInc');
+    if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.collections);
+    if(inc) inc.textContent = SENT_REMINDERS_THIS_SESSION.length + ' real reminder' + (SENT_REMINDERS_THIS_SESSION.length===1?'':'s') + ' sent · ' + overdue + ' real invoice' + (overdue===1?'':'s') + ' overdue';
+  }
 }
 
 /* Jump to a tab from any card in the workspace */
@@ -4736,11 +5147,43 @@ let schTimeframe = '30';
 let schStatus = 'all';
 let schSortDir = 1; // 1 ASC, -1 DESC by dueDate
 
+// Real invoices are only ever created once a human approves the deal in
+// Deal Pipeline (createOrUpdateInvoiceFromDeal) -- there is no real "not
+// yet drafted" state to schedule ahead of time, so this maps each real,
+// unpaid invoice (possibly a future installment of a recurring series)
+// straight onto the row shape this page already renders.
+function _realScheduleRows(){
+  return INVOICE_PIPELINE.rally.filter(i=>i.real && i.stage!=='paid').map(inv => ({
+    id: inv.id,
+    dueDate: inv.dueDate,
+    client: inv.customer || inv.client,
+    customer: inv.customer || inv.client,
+    contract: inv.ctag,
+    milestone: inv.milestone,
+    amount: inv.amount,
+    status: inv.stage,
+    linkedDealId: inv.linkedDealId,
+    real: true,
+  }));
+}
+
 function getScheduledInvoices(){
-  if(currentClient==='rally')   return SCHEDULED_INVOICES.rally.slice();
+  if(currentClient==='rally')   return _realScheduleRows();
   if(currentClient==='trade')   return SCHEDULED_INVOICES.trade.slice();
   if(currentClient==='halcyon') return SCHEDULED_INVOICES.halcyon.slice();
-  return SCHEDULED_INVOICES.rally.concat(SCHEDULED_INVOICES.trade, SCHEDULED_INVOICES.halcyon);
+  return _realScheduleRows().concat(SCHEDULED_INVOICES.trade, SCHEDULED_INVOICES.halcyon);
+}
+
+// "Today" for schedule filtering/KPIs: real invoice due dates are computed
+// from the actual wall clock (see _dueDateFromTerms), not the fictional
+// TODAY_SCH the trade/halcyon demo data was authored against -- so the
+// real (rally) view needs the real date or every bucket would be off by
+// however far TODAY_SCH has drifted from today.
+function _scheduleToday(){
+  if(currentClient === 'rally'){
+    const d = new Date(); d.setHours(0,0,0,0); return d;
+  }
+  return TODAY_SCH;
 }
 
 function clientKeyOf(inv){
@@ -4765,7 +5208,7 @@ function fmtDate(d){
 
 function schMatchesTimeframe(inv, tf){
   const dd = parseDate(inv.dueDate);
-  const delta = daysBetween(TODAY_SCH, dd);
+  const delta = daysBetween(_scheduleToday(), dd);
   if(tf==='week') return delta >= 0 && delta <= 7;
   if(tf==='30')   return delta >= -3 && delta <= 30;
   if(tf==='90')   return delta >= -3 && delta <= 90;
@@ -4793,9 +5236,18 @@ function renderSchedule(){
 
 function renderScheduleKpis(){
   const all = getScheduledInvoices();
-  const in30 = all.filter(i => { const d = daysBetween(TODAY_SCH, parseDate(i.dueDate)); return d >= 0 && d <= 30 && i.status !== 'paid' && i.status !== 'voided'; });
-  const in90 = all.filter(i => { const d = daysBetween(TODAY_SCH, parseDate(i.dueDate)); return d >= 0 && d <= 90 && i.status !== 'paid' && i.status !== 'voided'; });
-  const overdue = all.filter(i => { const d = daysBetween(TODAY_SCH, parseDate(i.dueDate)); return d < 0 && i.status === 'scheduled'; });
+  const today = _scheduleToday();
+  const in30 = all.filter(i => { const d = daysBetween(today, parseDate(i.dueDate)); return d >= 0 && d <= 30 && i.status !== 'paid' && i.status !== 'voided'; });
+  const in90 = all.filter(i => { const d = daysBetween(today, parseDate(i.dueDate)); return d >= 0 && d <= 90 && i.status !== 'paid' && i.status !== 'voided'; });
+  // "Overdue for issuance" for mock data means "should have been drafted
+  // by now" (status==='scheduled'). Real invoices are always drafted the
+  // moment their deal is approved, so there's no real equivalent of that
+  // state -- the honest real signal instead is a drafted invoice whose
+  // due date has already passed without being sent.
+  const overdue = all.filter(i => {
+    const d = daysBetween(today, parseDate(i.dueDate));
+    return d < 0 && (i.status === 'scheduled' || (i.real && i.status === 'draft'));
+  });
   const sum = arr => arr.reduce((s,i)=>s+i.amount, 0);
   const compact = n => n >= 1000 ? '$' + Math.round(n/1000) + 'K' : '$' + n;
 
@@ -4807,10 +5259,10 @@ function renderScheduleKpis(){
   const overdueEl = document.getElementById('schKpiOverdue');
   overdueEl.textContent = overdue.length;
   overdueEl.className = 'v' + (overdue.length > 0 ? ' warn-red' : '');
-  document.getElementById('schKpiOverdueMeta').textContent = overdue.length > 0 ? 'Emma should have drafted these' : 'No backlog';
+  document.getElementById('schKpiOverdueMeta').textContent = overdue.length > 0 ? 'Drafted but past due date, still unsent' : 'No backlog';
 
   const upcoming = all
-    .filter(i => daysBetween(TODAY_SCH, parseDate(i.dueDate)) >= 0 && i.status !== 'paid' && i.status !== 'voided')
+    .filter(i => daysBetween(today, parseDate(i.dueDate)) >= 0 && i.status !== 'paid' && i.status !== 'voided')
     .sort((a,b) => parseDate(a.dueDate) - parseDate(b.dueDate))[0];
   if(upcoming){
     document.getElementById('schKpiNext').textContent = fmtDate(parseDate(upcoming.dueDate));
@@ -4838,9 +5290,18 @@ function renderScheduleList(){
   tbody.innerHTML = rows.map(i => {
     const disabled = (i.status==='paid' || i.status==='voided') ? 'disabled style="opacity:.4;pointer-events:none"' : '';
     const billTo = customerFor(i);
+    const liveChip = i.real ? ' <span class="pill green dot" style="font-size:9.5px;margin-left:4px">Live</span>' : '';
+    // Real invoices are drafted the instant their deal is approved (no
+    // "not yet drafted" real state to advance), and there's no real
+    // voided/cancelled concept anywhere else in the app yet -- so those
+    // two actions only make sense for the mock rows. Snooze (push the due
+    // date back) is genuinely real: it edits the same invoice object
+    // Invoice Pipeline and Overview read.
+    const draftBtn = i.real ? '' : `<button class="btn sm" ${disabled} onclick="draftScheduledInvoice('${i.id}')">Draft now</button>`;
+    const voidBtn = i.real ? '' : `<button class="btn sm danger" ${disabled} onclick="voidScheduledInvoice('${i.id}')">Void</button>`;
     return `<tr onclick="openScheduledInvoiceDrawer('${i.id}')">
       <td class="mono">${i.dueDate}</td>
-      <td>${i.client}</td>
+      <td>${i.client}${liveChip}</td>
       <td style="font-weight:600">${billTo}</td>
       <td><span style="color:var(--purple-deep);text-decoration:underline dotted" onclick="event.stopPropagation();openDealDrawer('${i.linkedDealId}')">${i.contract}</span></td>
       <td>${i.milestone}</td>
@@ -4848,9 +5309,9 @@ function renderScheduleList(){
       <td>${statusPill(i.status)}</td>
       <td>
         <div class="sch-actions" onclick="event.stopPropagation()">
-          <button class="btn sm" ${disabled} onclick="draftScheduledInvoice('${i.id}')">Draft now</button>
+          ${draftBtn}
           <button class="btn sm" ${disabled} onclick="snoozeScheduledInvoice('${i.id}')">Snooze</button>
-          <button class="btn sm danger" ${disabled} onclick="voidScheduledInvoice('${i.id}')">Void</button>
+          ${voidBtn}
         </div>
       </td>
     </tr>`;
@@ -4865,6 +5326,11 @@ function findScheduled(id){
 }
 
 function draftScheduledInvoice(id){
+  const realInv = findPipelineInvoice(id);
+  if(realInv && realInv.real){
+    toast('warn', realInv.id + ' is already drafted — real invoices are created the moment their deal is approved.');
+    return;
+  }
   const inv = findScheduled(id); if(!inv) return;
   inv.status = 'draft';
   toast('success','Drafted ' + inv.id + ' · ' + money(inv.amount) + ' · ready for approval');
@@ -4872,6 +5338,25 @@ function draftScheduledInvoice(id){
 }
 
 function snoozeScheduledInvoice(id){
+  const realInv = findPipelineInvoice(id);
+  if(realInv && realInv.real){
+    const reason = prompt('Snooze reason (pushes the real invoice\'s due date back 7 days, logged to audit):', 'Client requested delay');
+    if(reason === null) return;
+    const d = parseDate(realInv.dueDate);
+    d.setDate(d.getDate() + 7);
+    realInv.dueDate = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+      AUDIT.unshift({
+        ts: _realNowStamp(), ev: 'invoice_snoozed', ent: 'invoice', actor: 'Alex Rivera',
+        target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate
+      });
+    }
+    toast('success','Snoozed ' + realInv.id + ' by 7 days · reason logged');
+    renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    renderSchedule();
+    return;
+  }
   const inv = findScheduled(id); if(!inv) return;
   const reason = prompt('Snooze reason (logged to audit trail):', 'Client requested delay');
   if(reason === null) return;
@@ -4883,6 +5368,11 @@ function snoozeScheduledInvoice(id){
 }
 
 function voidScheduledInvoice(id){
+  const realInv = findPipelineInvoice(id);
+  if(realInv && realInv.real){
+    toast('warn', 'Voiding isn\'t supported for real invoices yet');
+    return;
+  }
   const inv = findScheduled(id); if(!inv) return;
   if(!confirm('Void scheduled invoice ' + inv.id + '? This is a soft-void and can be reversed by finance.')) return;
   inv.status = 'voided';
@@ -4929,7 +5419,10 @@ function openScheduledInvoiceDrawer(id){
     ${draftPreview}
     ${contractRow}
   `;
-  const foot = `
+  const foot = inv.real ? `
+    <button class="btn" onclick="closeDrawer()">Close</button>
+    <button class="btn primary" onclick="closeDrawer();goToTab('invpipe');openInvoicePipelineDrawer('${inv.id}')">Open in Invoice Pipeline</button>
+  ` : `
     <button class="btn" onclick="closeDrawer()">Close</button>
     <button class="btn primary" onclick="draftScheduledInvoice('${inv.id}');closeDrawer()">Draft now</button>
   `;
@@ -4937,8 +5430,9 @@ function openScheduledInvoiceDrawer(id){
 }
 
 function openGenerateAheadModal(){
+  const today = _scheduleToday();
   const upcoming = getScheduledInvoices().filter(i => {
-    const d = daysBetween(TODAY_SCH, parseDate(i.dueDate));
+    const d = daysBetween(today, parseDate(i.dueDate));
     return d >= 0 && d <= 14 && i.status === 'scheduled';
   });
   if(upcoming.length === 0){
@@ -4961,8 +5455,9 @@ function openGenerateAheadModal(){
 
 function bulkGenerateAhead(){
   let n = 0;
+  const today = _scheduleToday();
   getScheduledInvoices().forEach(i => {
-    const d = daysBetween(TODAY_SCH, parseDate(i.dueDate));
+    const d = daysBetween(today, parseDate(i.dueDate));
     if(d >= 0 && d <= 14 && i.status === 'scheduled'){
       i.status = 'draft'; n++;
     }
@@ -5056,7 +5551,14 @@ async function loadRealDeals(refresh){
     }
     for(let i = DEALS.length - 1; i >= 0; i--){ if(DEALS[i].real) DEALS.splice(i, 1); }
     DEALS.unshift(...payload.deals);
+    REAL_COMPUTED_AT.deals = payload.computed_at || REAL_COMPUTED_AT.deals;
     renderPipeline();
+    applyRealOverviewKpis();
+    applyRealOverviewAttentionKpi();
+    applyRealMorningBrief();
+    applyRealRenewals();
+    applyRealScheduledInvoices();
+    applyRealAgentCards();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
@@ -5085,9 +5587,11 @@ async function loadRealCash(refresh){
     CASH_MATCHED.unshift(...(payload.matched || []));
     CASH_UNMATCHED.unshift(...(payload.unmatched || []));
     CASH_PARTIAL.unshift(...(payload.partial || []));
+    REAL_COMPUTED_AT.cash = payload.computed_at || REAL_COMPUTED_AT.cash;
     const activeTab = document.querySelector('#cash-tabs .subtab.active');
     renderCash(activeTab ? activeTab.dataset.cashtab : 'matched');
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    applyRealAgentCards();
     if(total){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', total + ' real QuickBooks payment/invoice record(s) loaded' + staleNote);
@@ -5109,7 +5613,11 @@ async function loadRealCollections(refresh){
     }
     for(let i = COLLECTIONS.length - 1; i >= 0; i--){ if(COLLECTIONS[i].real) COLLECTIONS.splice(i, 1); }
     COLLECTIONS.unshift(...list);
+    REAL_COMPUTED_AT.collections = payload.computed_at || REAL_COMPUTED_AT.collections;
     renderCollections();
+    applyRealOverviewAttentionKpi();
+    applyRealMorningBrief();
+    applyRealAgentCards();
     if(list.length){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', list.length + ' real overdue invoice(s) loaded' + staleNote);
@@ -5150,7 +5658,9 @@ async function runReminderCycle(){
       if(skipped.length) parts.push(skipped.length + ' skipped (no billing email on file)');
       toast(failed.length ? 'warn' : 'success', 'Reminder cycle · ' + parts.join(', ') + ' of ' + due + ' due');
     }
+    if(sent && sent.length) SENT_REMINDERS_THIS_SESSION.push(...sent);
     await loadRealCollections(true);
+    if(typeof applyRealMorningBrief === 'function') applyRealMorningBrief();
   }catch(e){
     toast('warn', 'Could not reach the reminder cycle API — is server.py running? (' + e.message + ')');
   }finally{
@@ -5193,6 +5703,8 @@ async function loadRealDealReconciliation(refresh){
     renderDealReconciliation(rows);
     DEAL_RECON = rows;
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    if(typeof applyRealOverviewCollectionKpis === 'function') applyRealOverviewCollectionKpis();
+    if(typeof applyRealMorningBrief === 'function') applyRealMorningBrief();
     if(rows.length){
       const matchedCount = rows.filter(r=>r.status!=='not_invoiced').length;
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
@@ -5203,10 +5715,92 @@ async function loadRealDealReconciliation(refresh){
   }
 }
 
+// Phase 4 (Overview real-data rework): real AR aging buckets from
+// /api/invoices/aging (server-side, cached/DB-backed same as every other
+// real endpoint) -- unlike Phases 1-3, this data isn't already loaded by
+// any other page, so it needs its own fetch rather than reusing one.
+async function loadRealAging(refresh){
+  try{
+    const res = await fetch('/api/invoices/aging' + (refresh ? '?refresh=1' : ''));
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    const buckets = payload.buckets || [];
+    if(payload.error && !buckets.length){
+      toast('warn', 'Live AR aging unavailable: ' + payload.error);
+      return;
+    }
+    const wrap = document.getElementById('agingBuckets');
+    const section = document.getElementById('agingSummarySection');
+    if(!wrap || !section) return;
+    if(!buckets.length){ section.style.display = 'none'; return; }
+    section.style.display = '';
+    wrap.innerHTML = buckets.map(b=>`
+      <div class="kpi">
+        <div class="l">${esc(b.label)}</div>
+        <div class="v${b.label==='90+ days' && b.total>0 ? ' red' : ''}">${money(b.total)}</div>
+        <div class="meta">${b.count} invoice${b.count===1?'':'s'}</div>
+      </div>`).join('');
+    if(buckets.length){
+      const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
+      toast(payload.error ? 'warn' : 'success', money(payload.grandTotal) + ' real outstanding across ' + buckets.reduce((s,b)=>s+b.count,0) + ' invoice(s)' + staleNote);
+    }
+  }catch(e){
+    toast('warn', 'Could not reach the live AR aging API — is server.py running? (' + e.message + ')');
+  }
+}
+
+// Real trailing-12-months invoiced/paid/outstanding/overdue, from
+// /api/invoices/monthly -- overwrites RALLY_MONTHLY's contents in place
+// (can't reassign a const, and MONTHLY_DATA.rally already points at this
+// exact array) so the existing chart/table/CSV-export code, which all
+// read from getMonthly() -> MONTHLY_DATA.rally, becomes real automatically
+// with no separate changes needed in any of them.
+async function loadRealMonthly(refresh){
+  try{
+    const res = await fetch('/api/invoices/monthly' + (refresh ? '?refresh=1' : ''));
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    const months = payload.months || [];
+    if(payload.error && !months.length){
+      toast('warn', 'Live monthly revenue unavailable: ' + payload.error);
+      return;
+    }
+    if(!months.length) return;
+    RALLY_MONTHLY.length = 0;
+    RALLY_MONTHLY.push(...months);
+    if(currentClient === 'rally'){
+      renderRevChart();
+      renderRevMonthlyTable();
+    }
+    const totalInvoiced = months.reduce((s,m)=>s+(Number(m.invoiced)||0),0);
+    const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
+    toast(payload.error ? 'warn' : 'success', 'Real trailing-12-months data loaded · ' + money(totalInvoiced) + ' invoiced total' + staleNote);
+  }catch(e){
+    toast('warn', 'Could not reach the live monthly revenue API — is server.py running? (' + e.message + ')');
+  }
+}
+
+// Real-time top-of-page date stamp -- was a fixed "Tuesday, September 15,
+// 2026 · live" that never actually changed despite the "live" label.
+// Ticks every second off the browser's own clock (no API call needed --
+// this is just the current date/time, not data that comes from a server).
+function updateTopDateStamp(){
+  const el = document.getElementById('topDateStamp');
+  if(!el) return;
+  const now = new Date();
+  const dateStr = now.toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'});
+  const timeStr = now.toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit', second:'2-digit'});
+  el.textContent = dateStr + ' · ' + timeStr + ' · live';
+}
+updateTopDateStamp();
+setInterval(updateTopDateStamp, 1000);
+
 loadRealDeals(false);
 loadRealCash(false);
 loadRealCollections(false);
 loadRealDealReconciliation(false);
+loadRealAging(false);
+loadRealMonthly(false);
 </script>
 
 <!-- ================== ASK EMMA CHAT ================== -->

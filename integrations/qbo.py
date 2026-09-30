@@ -21,6 +21,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from config import Settings, update_dotenv_value
+from db import db_save
 from integrations import _http
 
 log = logging.getLogger("qbo")
@@ -70,14 +71,20 @@ class QboClient:
         new_refresh = res.get("refresh_token")
         if new_refresh and new_refresh != self._refresh:
             self._refresh = new_refresh
-            # Never log the raw token -- persist it straight to .env instead,
-            # so a stale in-memory-only rotation can't silently break the
-            # next fresh process start (this is what caused a real
-            # "invalid_grant" failure).
+            # Never log the raw token -- persist it so a stale in-memory-only
+            # rotation can't silently break the next fresh process start
+            # (this is what caused a real "invalid_grant" failure). Two
+            # paths, not either/or: update_dotenv_value() covers local dev
+            # (a real .env file on disk to rewrite); db_save() covers a
+            # deployed environment (e.g. Railway) where there's no local
+            # file to rewrite at all -- load_settings() checks this DB value
+            # first and prefers it when present, so this is what actually
+            # matters once this app is deployed, not the .env rewrite.
+            db_save("qbo_refresh_token", new_refresh, time.time())
             if update_dotenv_value("QBO_REFRESH_TOKEN", new_refresh):
-                log.warning("QBO refresh token rotated — new value saved to .env automatically")
+                log.warning("QBO refresh token rotated — new value saved to .env and the database")
             else:
-                log.warning("QBO refresh token rotated but no .env file found to update — set QBO_REFRESH_TOKEN manually")
+                log.warning("QBO refresh token rotated — new value saved to the database (no local .env file to also update)")
 
     def _h(self) -> dict:
         self._ensure_token()

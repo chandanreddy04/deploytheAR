@@ -9,21 +9,21 @@ the existing mock data in emma_workspace.html; those workflows don't
 exist yet.
 
 Real deals/cash/collections are computed once and cached both in memory
-and in rally_state.db (SQLite, gitignored, created next to this project's
-root on first run) -- API calls aren't free and this project has already
-hit real rate limits calling too often, and used to re-pay that cost on
-every restart since nothing survived the process exiting. Hit
+and durably via db.py -- SQLite (rally_state.db, gitignored, project root)
+locally, or Postgres automatically when DATABASE_URL is set (e.g. deployed
+on Railway). API calls aren't free and this project has already hit real
+rate limits calling too often, and used to re-pay that cost on every
+restart since nothing survived the process exiting. Hit
 /api/deals?refresh=1 (etc.) to force a recompute.
 
 Usage:
-    python server.py [port]        # default port 8600
+    python server.py [port]        # default port 8600, or $PORT if set (Railway)
 """
 
 from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -39,6 +39,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from config import load_settings
 from content_extractor import extract
+from db import db_load as _db_load, db_save as _db_save
 from pdf_text import extract_text
 
 UI_DIR = Path(__file__).parent
@@ -47,54 +48,19 @@ _cache: dict = {"deals": None, "computed_at": 0.0, "error": None}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
 _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": None}
 _deal_recon_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
+_aging_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
+_monthly_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _CACHE_TTL_SECONDS = 300  # re-fetch at most every 5 minutes even without ?refresh=1
 
-# SQLite instead of the in-memory-only caches above going stale on every
-# restart -- a restart used to always force a full re-extraction of every
-# real deal through Groq (the exact rate-limit storm that's hit this
+# Durable cache instead of the in-memory-only caches above going stale on
+# every restart -- a restart used to always force a full re-extraction of
+# every real deal through Groq (the exact rate-limit storm that's hit this
 # project more than once), because nothing survived the process exiting.
-# One tiny key/value table is enough: each cache's whole snapshot (the
-# same shape it already holds in memory) is stored as one JSON blob under
-# its own key, alongside the same computed_at/error the in-memory dict
-# already tracks. This is a "latest known state" store, not a history
-# log -- each write replaces the previous one for that key, on purpose.
-_DB_PATH = ROOT / "rally_state.db"
-
-
-def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_DB_PATH)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS cache_store ("
-        "key TEXT PRIMARY KEY, data TEXT, computed_at REAL, error TEXT)"
-    )
-    return conn
-
-
-def _db_load(key: str) -> tuple[object | None, float, str | None]:
-    conn = _db()
-    try:
-        row = conn.execute(
-            "SELECT data, computed_at, error FROM cache_store WHERE key = ?", (key,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None, 0.0, None
-    data_json, computed_at, error = row
-    return (json.loads(data_json) if data_json is not None else None), computed_at, error
-
-
-def _db_save(key: str, data: object, computed_at: float, error: str | None) -> None:
-    conn = _db()
-    try:
-        conn.execute(
-            "INSERT INTO cache_store (key, data, computed_at, error) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET data=excluded.data, computed_at=excluded.computed_at, error=excluded.error",
-            (key, json.dumps(data), computed_at, error),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+# db.py (imported above) handles SQLite locally or Postgres automatically
+# when DATABASE_URL is set (e.g. deployed on Railway) -- same
+# cache_store(key, data, computed_at, error) shape either way. This is a
+# "latest known state" store, not a history log -- each write replaces
+# the previous one for that key, on purpose.
 
 # Design-doc dunning cadence (Section 10), each threshold the minimum
 # days-overdue for that stage -- checked highest-first so an invoice lands
@@ -613,6 +579,177 @@ def _real_outstanding_invoices() -> list[dict]:
     return out
 
 
+# Same standard AR aging buckets as ar_aging_report.py's CLI report,
+# exposed over HTTP too so the Overview page (a browser page, can't run a
+# Python script) can show a real aging summary. Duplicated rather than
+# imported from ar_aging_report.py -- that script already imports from
+# this module, so importing back would be circular.
+_AGING_BUCKET_ORDER = ["Current", "1-30 days", "31-60 days", "61-90 days", "90+ days"]
+
+
+def _aging_bucket_for(dpd: int) -> str:
+    if dpd <= 0:
+        return "Current"
+    if dpd <= 30:
+        return "1-30 days"
+    if dpd <= 60:
+        return "31-60 days"
+    if dpd <= 90:
+        return "61-90 days"
+    return "90+ days"
+
+
+def compute_aging_summary() -> dict:
+    rows = _real_outstanding_invoices()
+    totals = {label: 0.0 for label in _AGING_BUCKET_ORDER}
+    counts = {label: 0 for label in _AGING_BUCKET_ORDER}
+    for r in rows:
+        bucket = _aging_bucket_for(r["dpd"])
+        totals[bucket] += r["balance"]
+        counts[bucket] += 1
+    return {
+        "buckets": [
+            {"label": label, "total": round(totals[label], 2), "count": counts[label]}
+            for label in _AGING_BUCKET_ORDER
+        ],
+        "grandTotal": round(sum(totals.values()), 2),
+    }
+
+
+def get_aging_summary(force_refresh: bool = False) -> tuple[dict | None, str | None]:
+    if _aging_cache["data"] is None and not force_refresh:
+        data, computed_at, error = _db_load("aging")
+        if data is not None:
+            _aging_cache["data"], _aging_cache["computed_at"], _aging_cache["error"] = data, computed_at, error
+
+    stale = time.time() - _aging_cache["computed_at"] > _CACHE_TTL_SECONDS
+    if force_refresh or _aging_cache["data"] is None or stale:
+        try:
+            _aging_cache["data"] = compute_aging_summary()
+            _aging_cache["error"] = None
+        except Exception as exc:
+            _aging_cache["error"] = str(exc)
+            if _aging_cache["data"] is None:
+                _aging_cache["data"] = {"buckets": [], "grandTotal": 0}
+        _aging_cache["computed_at"] = time.time()
+        _db_save("aging", _aging_cache["data"], _aging_cache["computed_at"], _aging_cache["error"])
+    return _aging_cache["data"], _aging_cache["error"]
+
+
+def compute_monthly_summary() -> dict:
+    """Real trailing-12-months invoiced/paid/outstanding/overdue, bucketed
+    by each real invoice/payment's own real QuickBooks date (TxnDate) --
+    no separate history log needed, QuickBooks already carries these dates
+    itself. Scoped to real deal customers, same as everywhere else.
+
+    "Outstanding"/"overdue" for a given month are a current snapshot
+    sliced by which month the invoice was issued, not what the balance
+    looked like back in that month -- there's no historical balance to
+    look up, only the live one QuickBooks has right now. Unlike
+    _real_outstanding_invoices(), this includes fully-paid ($0 balance)
+    invoices too, since "Invoiced"/"Paid" need the complete picture, not
+    just what's still outstanding.
+    """
+    from datetime import date
+
+    from integrations.qbo import QboClient
+
+    settings = load_settings()
+    if settings.qbo_mode != "live":
+        raise RuntimeError("QBO_MODE is not 'live' -- set it in .env to fetch real invoice data")
+
+    deals, _ = get_deals()
+    real_customer_keys = {_normalize_customer_name(d.get("c", "")) for d in deals if d.get("real")}
+    real_customer_keys.discard("")
+
+    client = QboClient(settings)
+    all_invoices = client.list_invoices(limit=50)
+    invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
+    all_payments, _ = client.list_payments_since(None)
+    payments = [p for p in all_payments if _normalize_customer_name(p.customer_name) in real_customer_keys]
+
+    today = date.today()
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    # 12 buckets ending at the current month, oldest first -- same window
+    # shape as the frontend's original fabricated RALLY_MONTHLY data.
+    buckets = []
+    y, m = today.year, today.month
+    for _ in range(12):
+        buckets.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    buckets.reverse()
+    bucket_index = {ym: i for i, ym in enumerate(buckets)}
+
+    months = [
+        {"month": f"{month_names[bm - 1]} {str(by)[-2:]}", "invoiced": 0.0, "paid": 0.0, "outstanding": 0.0, "overdue": 0.0}
+        for (by, bm) in buckets
+    ]
+
+    for inv in invoices:
+        txn_raw = inv.get("TxnDate")
+        if not txn_raw:
+            continue
+        try:
+            txn_date = date.fromisoformat(txn_raw)
+        except ValueError:
+            continue
+        idx = bucket_index.get((txn_date.year, txn_date.month))
+        if idx is None:
+            continue
+        total = float(inv.get("TotalAmt") or 0)
+        balance = float(inv.get("Balance") or 0)
+        months[idx]["invoiced"] += total
+        months[idx]["outstanding"] += balance
+        due_raw = inv.get("DueDate")
+        if balance > 0 and due_raw:
+            try:
+                if date.fromisoformat(due_raw) < today:
+                    months[idx]["overdue"] += balance
+            except ValueError:
+                pass
+
+    for p in payments:
+        if p.voided or not p.txn_date:
+            continue
+        try:
+            txn_date = date.fromisoformat(p.txn_date)
+        except ValueError:
+            continue
+        idx = bucket_index.get((txn_date.year, txn_date.month))
+        if idx is None:
+            continue
+        months[idx]["paid"] += p.total_amount
+
+    for row in months:
+        for key in ("invoiced", "paid", "outstanding", "overdue"):
+            row[key] = round(row[key], 2)
+
+    return {"months": months}
+
+
+def get_monthly_summary(force_refresh: bool = False) -> tuple[dict | None, str | None]:
+    if _monthly_cache["data"] is None and not force_refresh:
+        data, computed_at, error = _db_load("monthly")
+        if data is not None:
+            _monthly_cache["data"], _monthly_cache["computed_at"], _monthly_cache["error"] = data, computed_at, error
+
+    stale = time.time() - _monthly_cache["computed_at"] > _CACHE_TTL_SECONDS
+    if force_refresh or _monthly_cache["data"] is None or stale:
+        try:
+            _monthly_cache["data"] = compute_monthly_summary()
+            _monthly_cache["error"] = None
+        except Exception as exc:
+            _monthly_cache["error"] = str(exc)
+            if _monthly_cache["data"] is None:
+                _monthly_cache["data"] = {"months": []}
+        _monthly_cache["computed_at"] = time.time()
+        _db_save("monthly", _monthly_cache["data"], _monthly_cache["computed_at"], _monthly_cache["error"])
+    return _monthly_cache["data"], _monthly_cache["error"]
+
+
 def compute_collections() -> list[dict]:
     """Real overdue invoices from the QuickBooks sandbox, each paired with a
     draft dunning email built from real invoice/customer data.
@@ -916,6 +1053,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"reconciliation": recon, "error": error, "computed_at": _deal_recon_cache["computed_at"]})
             return
 
+        if path == "/api/invoices/aging":
+            force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
+            summary, error = get_aging_summary(force_refresh=force)
+            self._send_json({**summary, "error": error, "computed_at": _aging_cache["computed_at"]})
+            return
+
+        if path == "/api/invoices/monthly":
+            force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
+            summary, error = get_monthly_summary(force_refresh=force)
+            self._send_json({**summary, "error": error, "computed_at": _monthly_cache["computed_at"]})
+            return
+
         if path.startswith("/api/deals/") and path.endswith("/pdf"):
             deal_id = path[len("/api/deals/"):-len("/pdf")]
             self._serve_deal_pdf(deal_id)
@@ -1103,8 +1252,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8600
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    import os
+
+    # CLI arg wins if given (local dev convention, e.g. `python server.py 8600`),
+    # otherwise PORT (Railway sets this automatically for a deployed service),
+    # otherwise the same 8600 default as before.
+    if len(sys.argv) > 1:
+        port = int(sys.argv[1])
+    else:
+        port = int(os.environ.get("PORT", "8600"))
+    # 0.0.0.0 instead of 127.0.0.1 -- required for the service to be reachable
+    # at all once deployed (Railway routes traffic to the container's network
+    # interface, not just localhost inside it); harmless locally too, still
+    # reachable at http://127.0.0.1:<port> or http://localhost:<port>.
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Emma UI (live HubSpot deals) — http://127.0.0.1:{port}")
     try:
         httpd.serve_forever()

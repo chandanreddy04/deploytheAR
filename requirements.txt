@@ -1,0 +1,3 @@
+pdfplumber
+reportlab
+psycopg2-binary
