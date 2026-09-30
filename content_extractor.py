@@ -88,7 +88,7 @@ def extract_anthropic(agreement_text: str, settings: Settings) -> ExtractionResu
         },
         json_body={
             "model": settings.llm_model,
-            "max_tokens": 1200,
+            "max_tokens": 3000,
             "messages": [{"role": "user", "content": _PROMPT + agreement_text}],
         },
     )
@@ -114,7 +114,7 @@ def extract_groq(agreement_text: str, settings: Settings) -> ExtractionResult:
         },
         json_body={
             "model": settings.groq_model,
-            "max_tokens": 1200,
+            "max_tokens": 3000,
             "messages": [{"role": "user", "content": _PROMPT + agreement_text}],
         },
     )
