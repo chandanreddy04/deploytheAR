@@ -1481,6 +1481,16 @@ function nowStamp(mOffset=0){
   return `2026-09-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+// Same "YYYY-MM-DD HH:MM:SS" shape as nowStamp() -- so real audit rows sit
+// visually consistent next to the fabricated demo ones -- but built from
+// the actual current time instead of the fixed fictional Sept 15 2026
+// clock, for AUDIT entries logged from genuinely real actions.
+function _realNowStamp(){
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 const AUDIT = [
   {ts:nowStamp(2),  ev:'invoice_awaiting_approval', ent:'invoice',actor:'Emma',target:'INV-2026-09-1204', rationale:'Amount $47K > $5K auto-approve threshold'},
   {ts:nowStamp(8),  ev:'invoice_created',           ent:'invoice',actor:'Emma',target:'INV-2026-09-1204', rationale:'Generated from HS-9128 · Acme Corp'},
@@ -2286,7 +2296,7 @@ async function sendRealInvoiceEmail(invId){
     inv.sentTo = payload.to;
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
-        ts: (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
+        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
         ev: 'invoice_sent', ent: 'invoice', actor: 'Alex Rivera',
         target: inv.id, rationale: 'Emailed to ' + payload.to
       });
@@ -2311,7 +2321,7 @@ function approveDeal(id){
     const first = invs[0];
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
-        ts: (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
+        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
         ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
         target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
           ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
@@ -2450,7 +2460,7 @@ function saveDealEdits(id){
 
   if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
     AUDIT.unshift({
-      ts: (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
+      ts: d.real ? _realNowStamp() : (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
       ev: 'deal_terms_edited',
       ent: 'deal',
       actor: 'Alex Rivera',
@@ -5337,7 +5347,7 @@ function snoozeScheduledInvoice(id){
     realInv.dueDate = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
-        ts: new Date().toISOString(), ev: 'invoice_snoozed', ent: 'invoice', actor: 'Alex Rivera',
+        ts: _realNowStamp(), ev: 'invoice_snoozed', ent: 'invoice', actor: 'Alex Rivera',
         target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate
       });
     }
