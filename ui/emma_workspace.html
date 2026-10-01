@@ -2290,6 +2290,7 @@ async function sendRealInvoiceEmail(invId){
     });
     const payload = await res.json();
     if(!payload.ok){ toast('warn', 'Send failed: ' + payload.error); if(btn){ btn.disabled=false; btn.textContent='Send invoice'; } return; }
+    const invBefore = {stage: inv.stage, sentAt: inv.sentAt || null, sentTo: inv.sentTo || null};
     inv.stage = 'sent';
     inv.sentAt = new Date().toISOString();
     inv.messageId = payload.messageId;
@@ -2298,7 +2299,9 @@ async function sendRealInvoiceEmail(invId){
       AUDIT.unshift({
         ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
         ev: 'invoice_sent', ent: 'invoice', actor: 'Alex Rivera',
-        target: inv.id, rationale: 'Emailed to ' + payload.to
+        target: inv.id, rationale: 'Emailed to ' + payload.to,
+        before: invBefore,
+        after: {stage: inv.stage, sentAt: inv.sentAt, sentTo: inv.sentTo}
       });
     }
     renderInvoicePipeline();
@@ -2315,6 +2318,7 @@ async function sendRealInvoiceEmail(invId){
 
 function approveDeal(id){
   const d = findDeal(id); if(!d) return;
+  const dealReviewBefore = d.review;
   d.review = 'approved';
   if(d.real){
     const invs = createOrUpdateInvoiceFromDeal(d);
@@ -2325,7 +2329,9 @@ function approveDeal(id){
         ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
         target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
           ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
-          : 'invoice autofilled from extracted contract terms')
+          : 'invoice autofilled from extracted contract terms'),
+        before: {dealId: d.id, review: dealReviewBefore},
+        after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
       });
     }
     renderPipeline();
@@ -2459,13 +2465,22 @@ function saveDealEdits(id){
   const fieldList = changed.length ? changed.join(', ') : 'no changes';
 
   if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+    const after = {
+      amt: d.amt, terms: d.terms, c: d.c, owner: d.owner,
+      termMonths: d.termMonths, autoRenew: d.autoRenew, invoicingSchedule: d.invoicingSchedule,
+      party_from: d.contract && d.contract.party_from,
+      party_to: d.contract && d.contract.party_to,
+      signatories: d.contract && d.contract.signatories ? d.contract.signatories.slice() : null,
+      lineItems: (d.lineItems||[]).map(li=>({...li}))
+    };
     AUDIT.unshift({
       ts: d.real ? _realNowStamp() : (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
       ev: 'deal_terms_edited',
       ent: 'deal',
       actor: 'Alex Rivera',
       target: d.id,
-      rationale: 'Edited parsed terms · ' + fieldList
+      rationale: 'Edited parsed terms · ' + fieldList,
+      ...(d.real ? {before, after} : {})
     });
   }
   openDealDrawer(id, false);
@@ -2889,11 +2904,20 @@ function renderAudit(){
 }
 function expandAudit(row,i){
   const a = (window.__auditRows||AUDIT)[i]; if(!a) return;
-  const before = JSON.stringify({status:'previous',ts:a.ts.slice(0,10),target:a.target},null,2);
-  const after  = JSON.stringify({status:a.ev,ts:a.ts,target:a.target,actor:a.actor,rationale:a.rationale},null,2);
+  // Real audit entries (approveDeal/sendRealInvoiceEmail/saveDealEdits/
+  // snoozeScheduledInvoice) attach genuine before/after state captured at
+  // the moment of the mutation. The ~30 fabricated demo rows never had
+  // real state to capture, so they fall back to the old illustrative
+  // placeholder -- never shown for a real row, since a.before always
+  // exists there.
+  const hasReal = a.before !== undefined || a.after !== undefined;
+  const beforeLabel = hasReal ? 'Before (real)' : 'Before snapshot (illustrative)';
+  const afterLabel = hasReal ? 'After (real)' : 'After snapshot (illustrative)';
+  const before = JSON.stringify(hasReal ? (a.before ?? {}) : {status:'previous',ts:a.ts.slice(0,10),target:a.target}, null, 2);
+  const after  = JSON.stringify(hasReal ? (a.after ?? {})  : {status:a.ev,ts:a.ts,target:a.target,actor:a.actor,rationale:a.rationale}, null, 2);
   openDrawer('Audit event · '+a.ev, `${a.actor} · ${a.target} · ${a.ts}`, `
-    <div class="dsec"><h4>Before snapshot</h4><div class="jsonbox">${before}</div></div>
-    <div class="dsec"><h4>After snapshot</h4><div class="jsonbox">${after}</div></div>
+    <div class="dsec"><h4>${beforeLabel}</h4><div class="jsonbox">${before}</div></div>
+    <div class="dsec"><h4>${afterLabel}</h4><div class="jsonbox">${after}</div></div>
     <div class="dsec"><h4>Context</h4><div style="font-size:12.5px;color:var(--text-2)">${a.rationale}</div></div>
   `, `<button class="btn" onclick="closeDrawer()">Close</button>`);
 }
@@ -5342,13 +5366,16 @@ function snoozeScheduledInvoice(id){
   if(realInv && realInv.real){
     const reason = prompt('Snooze reason (pushes the real invoice\'s due date back 7 days, logged to audit):', 'Client requested delay');
     if(reason === null) return;
+    const dueDateBefore = realInv.dueDate;
     const d = parseDate(realInv.dueDate);
     d.setDate(d.getDate() + 7);
     realInv.dueDate = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
         ts: _realNowStamp(), ev: 'invoice_snoozed', ent: 'invoice', actor: 'Alex Rivera',
-        target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate
+        target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate,
+        before: {dueDate: dueDateBefore},
+        after: {dueDate: realInv.dueDate}
       });
     }
     toast('success','Snoozed ' + realInv.id + ' by 7 days · reason logged');
