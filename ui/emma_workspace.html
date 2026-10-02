@@ -2864,7 +2864,8 @@ function renderIncidents(){
   const q = document.getElementById('incSearch').value.toLowerCase();
   const tf = document.getElementById('incTypeF').value;
   const sf = document.getElementById('incStatusF').value;
-  const rows = getIncidents().filter(i=>{
+  const all = getIncidents();
+  const rows = all.filter(i=>{
     if(tf && i.type!==tf) return false;
     if(sf && i.st!==sf) return false;
     if(q && !(i.id+' '+i.c+' '+i.type+' '+(i.inv||'')).toLowerCase().includes(q)) return false;
@@ -2872,6 +2873,15 @@ function renderIncidents(){
   });
   document.getElementById('incCount').textContent = rows.length + ' incidents';
   const tb = document.querySelector('#tbl-incidents tbody');
+  // Distinguish "genuinely nothing real to flag" from "filters hid
+  // existing rows" -- the old single message made an honest-empty real
+  // result (every real DPD/confidence/match signal within normal range)
+  // read like a filter mistake instead of a clean state.
+  const emptyMsg = all.length === 0
+    ? (currentClient === 'rally'
+        ? 'No real incidents right now — every real signal (overdue DPD, unmatched cash, extraction confidence) is within normal range'
+        : 'No incidents')
+    : 'No incidents match filters';
   tb.innerHTML = rows.map(i=>{
     const stColor = i.st==='resolved'?'green':i.st==='awaiting_approval'?'amber':'red';
     const liveChip = i.real ? ' <span class="pill green dot" style="font-size:9.5px;margin-left:4px">Live</span>' : '';
@@ -2883,7 +2893,7 @@ function renderIncidents(){
       <td>${i.h}</td>
       <td class="num">${i.age}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" class="empty">No incidents match filters</td></tr>`;
+  }).join('') || `<tr><td colspan="6" class="empty">${emptyMsg}</td></tr>`;
 }
 ['incSearch','incTypeF','incStatusF'].forEach(id=>document.getElementById(id).addEventListener('input', renderIncidents));
 
