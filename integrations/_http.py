@@ -22,6 +22,18 @@ RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_BACKOFF_BASE = 0.75  # seconds
 
+# A 429/503 whose Retry-After is this short is worth waiting out inline --
+# e.g. Groq's per-minute token limit resets within its own rolling window,
+# so a few seconds' wait often turns a would-be failure into a quiet
+# success. Beyond this, the wait is almost certainly a longer quota (a
+# daily token cap told us "try again in 25 minutes" once) that will never
+# clear within a request -- sleeping for it would just block the caller
+# (compute_deals() runs synchronously inside the HTTP request handler, so
+# blocking here once froze the whole server for minutes). Past this
+# threshold, fail fast instead and let the caller's own per-item fallback
+# (e.g. "kept last known-good extraction") take over immediately.
+MAX_INLINE_RETRY_WAIT = 20.0  # seconds
+
 
 class HttpError(RuntimeError):
     def __init__(self, status: int, url: str, body: str):
@@ -31,12 +43,17 @@ class HttpError(RuntimeError):
         self.body = body
 
 
-def _sleep_for(attempt: int, retry_after: str | None) -> float:
+def _sleep_for(attempt: int, retry_after: str | None) -> float | None:
+    """Seconds to sleep before retrying, or None if the provider's
+    requested wait is too long to be worth retrying inline -- the caller
+    should fail fast instead."""
     if retry_after:
         try:
-            return min(float(retry_after), 60.0)
+            wait = float(retry_after)
         except ValueError:
-            pass
+            wait = None
+        if wait is not None:
+            return wait if wait <= MAX_INLINE_RETRY_WAIT else None
     return DEFAULT_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 0.4)
 
 
@@ -83,6 +100,12 @@ def request(
             body = e.read().decode("utf-8", "replace")
             if retry and e.code in RETRY_STATUSES and attempt < attempts:
                 wait = _sleep_for(attempt, e.headers.get("Retry-After"))
+                if wait is None:
+                    log.warning(
+                        "HTTP %s %s -> requested wait exceeds %.0fs, failing fast instead of blocking",
+                        e.code, url, MAX_INLINE_RETRY_WAIT,
+                    )
+                    raise HttpError(e.code, url, body) from None
                 log.warning("HTTP %s %s -> retry %d/%d in %.1fs", e.code, url, attempt, attempts, wait)
                 time.sleep(wait)
                 continue
