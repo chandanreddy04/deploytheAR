@@ -45,7 +45,7 @@ from pdf_text import extract_text
 
 UI_DIR = Path(__file__).parent
 
-_cache: dict = {"deals": None, "computed_at": 0.0, "error": None}
+_cache: dict = {"deals": None, "computed_at": 0.0, "error": None, "skipped": []}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
 _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": None}
 _deal_recon_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
@@ -249,7 +249,7 @@ def _build_deal(deal, agreement, fields: dict, confidence: dict, page_count: int
     }
 
 
-def compute_deals() -> tuple[list[dict], list[tuple[str, str, str]]]:
+def compute_deals() -> tuple[list[dict], list[tuple[str, str, str, str, float]]]:
     from integrations.hubspot import HubSpotClient, NoAgreementFound
     import pdfplumber
     import io
@@ -260,13 +260,25 @@ def compute_deals() -> tuple[list[dict], list[tuple[str, str, str]]]:
 
     client = HubSpotClient(settings.hubspot_token)
     out = []
-    skipped: list[tuple[str, str, str]] = []  # (deal_id, deal_name, error)
+    # (deal_id, deal_name, error, kind, amount) -- kind is machine-readable
+    # so the frontend can tell "no contract exists at all" (a real,
+    # actionable gap worth its own incident) apart from a transient
+    # extraction failure, instead of string-matching the human-readable
+    # error text. amount rides along since it's already on hand and useful
+    # for prioritizing which skipped deal to chase down first.
+    skipped: list[tuple[str, str, str, str, float]] = []
     for deal in client.list_closed_deals(limit=10):
         if not deal.agreement_ref:
+            # Previously just `continue` -- the deal vanished with no
+            # record anywhere that it was ever seen, let alone why it's
+            # missing from Deal Pipeline. Record it instead so a real
+            # "deal_missing_signed_pdf" incident can surface it.
+            skipped.append((deal.deal_id, deal.deal_name, "No signed agreement attached to this deal", "no_agreement", deal.amount))
             continue
         try:
             agreement = client.get_agreement(deal.agreement_ref)
         except NoAgreementFound:
+            skipped.append((deal.deal_id, deal.deal_name, "No signed agreement attached to this deal", "no_agreement", deal.amount))
             continue
 
         parsed = extract_text(agreement.content)
@@ -281,7 +293,7 @@ def compute_deals() -> tuple[list[dict], list[tuple[str, str, str]]]:
             # this in the error field so it's never silently swallowed,
             # and falls back to this deal's last known-good extraction
             # (deal_id is what lets it find that prior entry).
-            skipped.append((deal.deal_id, deal.deal_name, str(exc)))
+            skipped.append((deal.deal_id, deal.deal_name, str(exc), "extraction_error", deal.amount))
             continue
 
         try:
@@ -325,7 +337,7 @@ def get_deals(force_refresh: bool = False) -> tuple[list[dict], str | None]:
                     # scoped to "customers with a currently-real deal". Recover the
                     # last known-good entry for it instead of just dropping it.
                     recovered_ids = set()
-                    for deal_id, name, err in skipped:
+                    for deal_id, name, err, kind, amount in skipped:
                         old = prior_by_id.get(deal_id)
                         if old:
                             deals.append(old)
@@ -337,9 +349,17 @@ def get_deals(force_refresh: bool = False) -> tuple[list[dict], str | None]:
                     _cache["error"] = (
                         "; ".join(
                             f"{name}: {err}" + (" (kept last known-good extraction)" if deal_id in recovered_ids else "")
-                            for deal_id, name, err in skipped
+                            for deal_id, name, err, kind, amount in skipped
                         ) if skipped else None
                     )
+                    # Structured, not just the joined error string above --
+                    # lets the frontend tell "no contract exists at all"
+                    # (worth its own real incident) apart from a transient
+                    # extraction failure, without parsing error text.
+                    _cache["skipped"] = [
+                        {"dealId": deal_id, "name": name, "error": err, "kind": kind, "amount": amount}
+                        for deal_id, name, err, kind, amount in skipped
+                    ]
                 except Exception as exc:
                     _cache["error"] = str(exc)
                     if _cache["deals"] is None:
@@ -1069,7 +1089,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/deals":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             deals, error = get_deals(force_refresh=force)
-            self._send_json({"deals": deals, "error": error, "computed_at": _cache["computed_at"]})
+            self._send_json({"deals": deals, "error": error, "computed_at": _cache["computed_at"], "skipped": _cache["skipped"]})
             return
 
         if path == "/api/cash":

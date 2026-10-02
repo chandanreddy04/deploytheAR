@@ -3756,8 +3756,15 @@ function sendReminderNow(inv){
 function suggestedReplyForIncident(i){
   if(i.type==='invoice_dispute') return "Hi "+i.c+" team,\n\nThanks for the note on "+i.inv+". Collections is paused while we investigate. Can we set up a 15 minute call this week to walk through the line items in dispute?\n\nEmma (on behalf of Rally UXR)";
   if(i.type==='payment_unmatched') return "Hi,\n\nWe received a payment we could not match to an open invoice. Could you confirm the memo and remittance detail so we can apply it correctly?\n\nEmma (on behalf of Rally UXR)";
-  if(i.type==='deal_missing_signed_pdf') return "Hi "+i.h+",\n\nHubSpot deal "+i.deal+" shows closedwon but there is no signed_agreement on the record. Could you upload it or point us to the file? Invoice generation is paused until then.\n\nEmma";
-  if(i.type==='deal_low_confidence_extraction') return "Hi "+i.h+",\n\nOCR extraction on the contract for "+i.c+" came back at 0.72 confidence, below our 0.85 threshold. Please review the parsed fields before we proceed.\n\nEmma";
+  if(i.type==='deal_missing_signed_pdf'){
+    const who = i.real ? 'team' : i.h;
+    return "Hi "+who+",\n\nHubSpot deal "+i.deal+" shows closedwon but there is no signed agreement on the record. Could you upload it or point us to the file? Invoice generation is paused until then.\n\nEmma";
+  }
+  if(i.type==='deal_low_confidence_extraction'){
+    const who = i.real ? 'team' : i.h;
+    const confN = i.real && typeof i.conf === 'number' ? i.conf.toFixed(2) : '0.72';
+    return "Hi "+who+",\n\nExtraction on the contract for "+i.c+" came back at "+confN+" confidence, below our 0.85 threshold. Please review the parsed fields before we proceed.\n\nEmma";
+  }
   if(i.type==='invoice_delivery_failed') return "Hi "+i.c+" team,\n\nOur last delivery of "+i.inv+" bounced. Could you confirm the current AP inbox so we can resend?\n\nEmma";
   if(i.type==='payment_overpaid') return "Hi "+i.c+" team,\n\nWe received a payment that came in $200 above the invoice total on "+i.inv+". Would you like the difference credited to the next invoice or refunded?\n\nEmma";
   if(i.type==='invoice_rejected') return "Hi "+i.h+",\n\nRegenerating "+i.inv+" with the corrected line item now. Will resurface for approval shortly.\n\nEmma";
@@ -3856,10 +3863,16 @@ function emmaPriorActions(i){
   if(t==='payment_overpaid') return [
     'Matched the payment to ' + i.inv + ' on memo.',
     'Flagged the $200 delta for a human decision: credit the next invoice or refund.'];
-  if(t==='deal_missing_signed_pdf') return [
-    'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
-    'Checked the deal record for signed_agreement — none attached.',
-    'Paused invoice generation and pinged the deal owner.'];
+  if(t==='deal_missing_signed_pdf'){
+    if(i.real) return [
+      'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
+      'Checked the deal record for a signed agreement — none attached.',
+      'Paused invoice generation until a signed contract is attached in HubSpot.'];
+    return [
+      'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
+      'Checked the deal record for signed_agreement — none attached.',
+      'Paused invoice generation and pinged the deal owner.'];
+  }
   if(t==='deal_ambiguous_pdf') return [
     'Found two signed PDFs on the deal record (MSA_v2 and Order form).',
     'Paused extraction until the owner picks the source of truth.'];
@@ -4724,6 +4737,12 @@ let SENT_REMINDERS_THIS_SESSION = [];
 // so the Team of agents cards can show a genuine "last run" time instead of
 // a fixed fake one.
 let REAL_COMPUTED_AT = {deals: null, cash: null, collections: null, invoicing: null};
+// Deals compute_deals() couldn't build an invoice for this round, with a
+// machine-readable reason (e.g. "no_agreement" -- no signed contract
+// attached at all) -- captured by loadRealDeals() so applyRealIncidents()
+// can surface the ones worth a human's attention instead of the deal
+// just silently never appearing anywhere.
+let REAL_DEALS_SKIPPED = [];
 
 function applyClient(){
   const p = CLIENT_PROFILES[currentClient];
@@ -5128,6 +5147,19 @@ function applyRealIncidents(){
         age: _compactAge(REAL_COMPUTED_AT.deals), src:'PDF extraction confidence '+d.conf.toFixed(2)+' (below 0.85)',
         amt:d.amt, inv:'—', deal:d.id, real:true, conf:d.conf});
     }
+  }
+
+  // Real HubSpot deals closed-won with no signed contract attached at
+  // all -- server.py used to just silently drop these before they ever
+  // reached the frontend. Only "no_agreement" becomes an incident here;
+  // "extraction_error" (e.g. a Groq rate limit) already has its own
+  // recovery path (last known-good extraction) and isn't itself a real
+  // action item the way a genuinely missing contract is.
+  for(const s of REAL_DEALS_SKIPPED){
+    if(s.kind !== 'no_agreement') continue;
+    rows.push({id:'INC-REAL-NOPDF-'+s.dealId, type:'deal_missing_signed_pdf', c:s.name, st:'held_for_review', h:'Emma',
+      age: _compactAge(REAL_COMPUTED_AT.deals), src:'HubSpot deal closed-won · no signed agreement attached',
+      amt: s.amount || 0, inv:'—', deal:s.dealId, real:true});
   }
 
   REAL_INCIDENTS = rows;
@@ -5703,6 +5735,7 @@ async function loadRealDeals(refresh){
     for(let i = DEALS.length - 1; i >= 0; i--){ if(DEALS[i].real) DEALS.splice(i, 1); }
     DEALS.unshift(...payload.deals);
     REAL_COMPUTED_AT.deals = payload.computed_at || REAL_COMPUTED_AT.deals;
+    REAL_DEALS_SKIPPED = payload.skipped || [];
     renderPipeline();
     applyRealOverviewKpis();
     applyRealOverviewAttentionKpi();
