@@ -256,7 +256,7 @@ def _build_deal(deal, agreement, fields: dict, confidence: dict, page_count: int
     }
 
 
-def compute_deals() -> tuple[list[dict], list[tuple[str, str, str, str, float]]]:
+def compute_deals(prior_by_id: dict[str, dict] | None = None) -> tuple[list[dict], list[tuple[str, str, str, str, float]]]:
     from integrations.hubspot import HubSpotClient, NoAgreementFound
     import pdfplumber
     import io
@@ -281,6 +281,17 @@ def compute_deals() -> tuple[list[dict], list[tuple[str, str, str, str, float]]]
             # missing from Deal Pipeline. Record it instead so a real
             # "deal_missing_signed_pdf" incident can surface it.
             skipped.append((deal.deal_id, deal.deal_name, "No signed agreement attached to this deal", "no_agreement", deal.amount))
+            continue
+
+        prior = (prior_by_id or {}).get(deal.deal_id)
+        if prior and prior.get("agreementRef") == deal.agreement_ref:
+            # Same signed contract as last time -- re-running it through
+            # the LLM would just spend shared Groq per-minute token budget
+            # to get back the identical answer. Reuse it so that budget
+            # goes to deals whose attachment actually changed instead of
+            # being split evenly (and often lost to 429s) across every
+            # deal on every refresh.
+            out.append(prior)
             continue
         try:
             agreement = client.get_agreement(deal.agreement_ref)
@@ -336,7 +347,7 @@ def get_deals(force_refresh: bool = False) -> tuple[list[dict], str | None]:
             if force_refresh or _cache["deals"] is None or still_stale:
                 prior_by_id = {d["id"]: d for d in (_cache["deals"] or [])}
                 try:
-                    deals, skipped = compute_deals()
+                    deals, skipped = compute_deals(prior_by_id)
                     # A deal whose extraction fails THIS round shouldn't vanish if
                     # we already have a good extraction for it from before -- that
                     # used to cascade into Cash Application/Collections silently
