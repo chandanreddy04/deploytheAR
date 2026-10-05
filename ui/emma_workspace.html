@@ -2285,9 +2285,20 @@ async function sendRealInvoiceEmail(invId){
   }
   const seller = sellerFor(inv.linkedDealId);
   const custName = customerFor(inv);
+  // Same fallback as openInvoicePipelineDrawer()'s preview: an empty
+  // inv.lineItems on a recurring multi-period invoice doesn't mean
+  // nothing was extracted (the deal's real pricing table is intact --
+  // just not apportioned per period), so the real emailed PDF needs a
+  // row here too, not a blank table. Previously fell back to [] -- the
+  // actual sent email would have shown zero line items at all.
   const items = (Array.isArray(inv.lineItems) && inv.lineItems.length)
     ? inv.lineItems.map(li=>({desc: li.desc, qty: li.qty, unit: li.unit, amount: li.amount}))
-    : [];
+    : [{
+        desc: inv.seriesCount > 1
+          ? inv.milestone + ' — even split of contract total, see full contract for itemized pricing'
+          : 'Contract total (line items not extracted)',
+        qty: 1, unit: inv.amount, amount: inv.amount
+      }];
   const btn = document.getElementById('realInvSendBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Sending…'; }
   try{
@@ -2763,7 +2774,16 @@ function openInvoicePipelineDrawer(id){
   const items = (Array.isArray(inv.lineItems) && inv.lineItems.length)
     ? inv.lineItems.map(li=>({ desc: li.desc, dateRange: '', qty: li.qty, unit: li.unit, amount: li.amount }))
     : (inv.real
-        ? [{ desc: 'Contract total (line items not extracted)', dateRange: 'Due ' + inv.dueDate, qty:1, unit:inv.amount, amount:inv.amount }]
+        // A recurring multi-period invoice (seriesCount > 1) genuinely did
+        // have real line items extracted from the contract -- they just
+        // aren't apportioned per period (createOrUpdateInvoiceFromDeal()
+        // splits the total evenly instead of guessing which line item
+        // belongs to which installment). "Not extracted" would be a lie
+        // here; reuse the already-correct milestone text instead (e.g.
+        // "Recurring monthly invoice 18 of 18"), which is only genuinely
+        // true for a real single-shot invoice where no pricing table
+        // existed in the contract at all.
+        ? [{ desc: (inv.seriesCount > 1 ? inv.milestone + ' — even split of contract total, see full contract for itemized pricing' : 'Contract total (line items not extracted)'), dateRange: 'Due ' + inv.dueDate, qty:1, unit:inv.amount, amount:inv.amount }]
         : [{ desc: inv.milestone, dateRange: 'Due ' + inv.dueDate, qty:1, unit:inv.amount, amount:inv.amount }]);
   // Real invoices get an honest send section: the real extracted billing
   // email pre-filled (never the fabricated ap@<slug>.com billToFor() uses
