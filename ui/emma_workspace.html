@@ -2365,6 +2365,7 @@ function approveDeal(id){
         after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
       });
     }
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
     renderPipeline();
     renderInvoicePipeline();
     if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
@@ -5103,6 +5104,82 @@ function applyRealAgentCards(){
   }
 }
 
+// Loose match key for a customer name, mirroring server.py's
+// _normalize_customer_name exactly (lowercase, strip punctuation, strip
+// common legal suffixes) -- needed here because a QBO payment's
+// customer name and this app's extracted customer_legal_name are never
+// guaranteed byte-for-byte identical.
+function _normCustomerNameJs(name){
+  if(!name) return '';
+  let n = String(name).toLowerCase().replace(/[,.]/g,'').trim();
+  const suffixes = [' inc',' llc',' corp',' corporation',' ltd',' co',' partners',' solutions',' group'];
+  for(const suf of suffixes){
+    if(n.endsWith(suf)) n = n.slice(0, -suf.length).trim();
+  }
+  return n;
+}
+
+// Auto-marks a real Invoice Pipeline invoice 'paid' once QuickBooks' own
+// Payment.LinkedTxn (CASH_MATCHED, an authoritative fact from QBO, not a
+// guess) shows a payment came in for that customer. There is no invoice-id
+// linkage to lean on -- the human-created QBO invoice has its own
+// DocNumber, unrelated to this app's INV-* ids -- so matching is by
+// customer name, disambiguated by amount when a customer has more than
+// one open invoice. If amount still doesn't uniquely identify one (e.g.
+// several same-size recurring periods), the earliest-due-date invoice is
+// assumed paid first (a disclosed FIFO assumption, not a fabricated
+// value); genuinely ambiguous cases are left alone rather than guessed.
+// A payment smaller than the invoice it would otherwise match (a partial
+// payment, already surfaced honestly in Cash Application's own "Partial"
+// bucket) never marks that invoice paid -- only a payment that actually
+// covers the invoice amount does.
+function applyRealCashToInvoices(){
+  if(currentClient !== 'rally') return;
+  if(!CASH_MATCHED.length) return;
+  const pool = INVOICE_PIPELINE.rally;
+  const openByCustomer = new Map();
+  for(const inv of pool){
+    if(!inv.real || inv.stage === 'paid') continue;
+    const key = _normCustomerNameJs(customerFor(inv));
+    if(!key) continue;
+    if(!openByCustomer.has(key)) openByCustomer.set(key, []);
+    openByCustomer.get(key).push(inv);
+  }
+  for(const p of CASH_MATCHED){
+    if(!p.real) continue;
+    const key = _normCustomerNameJs(p.c);
+    const open = openByCustomer.get(key);
+    if(!open || !open.length) continue;
+
+    let target;
+    if(open.length === 1){
+      // A payment smaller than this invoice is a partial payment, not a
+      // payoff -- don't mark the whole thing paid on partial money.
+      target = (p.amt >= open[0].amount - 0.01) ? open[0] : null;
+    } else {
+      const byAmount = open.filter(inv => Math.abs(inv.amount - p.amt) < 0.01);
+      target = byAmount.length === 1 ? byAmount[0]
+        : byAmount.length > 1 ? byAmount.slice().sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate))[0]
+        : null;
+    }
+    if(!target) continue; // ambiguous, or payment doesn't cover the invoice -- don't guess
+
+    const before = {stage: target.stage};
+    target.stage = 'paid';
+    target.paidVia = 'QBO payment ' + (p.qb || '—') + (p.when ? ' · ' + p.when : '');
+    if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+      AUDIT.unshift({
+        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
+        ev: 'invoice_auto_marked_paid', ent: 'invoice', actor: 'Emma',
+        target: target.id, rationale: 'QuickBooks payment ' + (p.qb || '—') + ' matched to ' + p.c,
+        before, after: {stage: target.stage, paidVia: target.paidVia}
+      });
+    }
+    const idx = open.indexOf(target);
+    if(idx > -1) open.splice(idx, 1); // don't let a second matched payment for the same customer re-claim it
+  }
+}
+
 // Real incidents -- derived fresh every time from real cash/collections/
 // deal data already loaded elsewhere, never persisted. An incident
 // disappears the moment its underlying real condition clears (a payment
@@ -5758,6 +5835,8 @@ async function loadRealDeals(refresh){
     applyRealRenewals();
     applyRealScheduledInvoices();
     applyRealAgentCards();
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
+    renderInvoicePipeline();
     if(typeof applyRealIncidents === 'function') applyRealIncidents();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
@@ -5788,9 +5867,13 @@ async function loadRealCash(refresh){
     CASH_UNMATCHED.unshift(...(payload.unmatched || []));
     CASH_PARTIAL.unshift(...(payload.partial || []));
     REAL_COMPUTED_AT.cash = payload.computed_at || REAL_COMPUTED_AT.cash;
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
     const activeTab = document.querySelector('#cash-tabs .subtab.active');
     renderCash(activeTab ? activeTab.dataset.cashtab : 'matched');
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
     applyRealAgentCards();
     if(typeof applyRealIncidents === 'function') applyRealIncidents();
     if(total){
