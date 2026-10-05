@@ -920,7 +920,10 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
     <section class="screen" id="scr-invpipe">
       <div class="section">
         <div class="sh"><h3>Invoice pipeline · kanban</h3><span class="desc">· one card per scheduled invoice · drag cards between columns for demo</span>
-          <div class="right"><span class="pill purple dot" id="invPipeCountLbl">0 invoices in flight</span></div>
+          <div class="right">
+            <button class="csv-btn" id="btnRefreshInvPipe" onclick="refreshRealCash('btnRefreshInvPipe')">Refresh</button>
+            <span class="pill purple dot" id="invPipeCountLbl">0 invoices in flight</span>
+          </div>
         </div>
         <div class="body">
           <div class="kanban" id="kanban-invoices"></div>
@@ -5888,8 +5891,12 @@ async function loadRealCash(refresh){
   }
 }
 
-async function refreshRealCash(){
-  const btn = document.getElementById('btnRefreshCash');
+// Shared by both the Cash Application and Invoice Pipeline "Refresh"
+// buttons -- loadRealCash() already re-runs applyRealCashToInvoices()
+// and renderInvoicePipeline(), so either button forces the same fresh
+// QuickBooks pull and the same auto-mark-paid recheck.
+async function refreshRealCash(btnId){
+  const btn = document.getElementById(btnId || 'btnRefreshCash');
   if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
   try{
     await loadRealCash(true);
