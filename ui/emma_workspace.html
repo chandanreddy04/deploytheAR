@@ -599,7 +599,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       <div class="ni" data-tab="invpipe"><span class="av">I</span><span class="lb">Invoice pipeline</span><span class="badge" id="navInvCount" style="background:var(--slate-bg);color:var(--text-2)">0</span></div>
       <div class="ni" data-tab="cash"><span class="av">Ca</span><span class="lb">Cash application</span></div>
       <div class="ni" data-tab="collections"><span class="av">Cq</span><span class="lb">Collections queue</span><span class="badge" id="navCollectionsCount" style="background:var(--amber-bg);color:#8a5a10">0</span></div>
-      <div class="ni" data-tab="incidents"><span class="av">In</span><span class="lb">Incidents</span><span class="badge">15</span></div>
+      <div class="ni" data-tab="incidents"><span class="av">In</span><span class="lb">Incidents</span><span class="badge" id="navIncidentsCount">0</span></div>
       <div class="ni" data-tab="audit"><span class="av">Au</span><span class="lb">Audit</span></div>
       <div class="ni" data-tab="config"><span class="av">Cf</span><span class="lb">Config</span></div>
     </nav>
@@ -835,6 +835,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         <div class="sh">
           <h3>Contracts to review</h3>
           <span class="desc">· click a row to inspect the parsed contract and PDF</span>
+          <div class="right"><button class="csv-btn" id="btnRefreshDeals" onclick="refreshRealDeals()">Refresh</button></div>
         </div>
         <div class="body padless">
           <table class="t" id="tbl-deal-review">
@@ -920,7 +921,10 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
     <section class="screen" id="scr-invpipe">
       <div class="section">
         <div class="sh"><h3>Invoice pipeline · kanban</h3><span class="desc">· one card per scheduled invoice · drag cards between columns for demo</span>
-          <div class="right"><span class="pill purple dot" id="invPipeCountLbl">0 invoices in flight</span></div>
+          <div class="right">
+            <button class="csv-btn" id="btnRefreshInvPipe" onclick="refreshRealCash('btnRefreshInvPipe')">Refresh</button>
+            <span class="pill purple dot" id="invPipeCountLbl">0 invoices in flight</span>
+          </div>
         </div>
         <div class="body">
           <div class="kanban" id="kanban-invoices"></div>
@@ -936,7 +940,10 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         <div class="sh">
           <h3>Daily reconciliation</h3>
           <span class="desc">· Tuesday Sep 16, 2026 · Emma's morning 3-way check</span>
-          <div class="right"><button class="csv-btn" onclick="exportReconReport()">Export reconciliation report</button></div>
+          <div class="right">
+            <button class="csv-btn" id="btnRefreshCash" onclick="refreshRealCash()">Refresh</button>
+            <button class="csv-btn" onclick="exportReconReport()">Export reconciliation report</button>
+          </div>
         </div>
         <div class="recon-tiles" id="reconTiles"></div>
         <div id="reconVarianceHdr" style="padding:0 18px 6px;font-size:12px;color:var(--text-3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Variance breakdown · 3 unmatched items · $7,200 total</div>
@@ -997,7 +1004,10 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       <div class="section">
         <div class="sh">
           <h3>Collections queue · dunning stages</h3>
-          <div class="right"><button class="csv-btn" id="runReminderCycleBtn" onclick="runReminderCycle()">Run reminder cycle</button></div>
+          <div class="right">
+            <button class="csv-btn" id="btnRefreshCollections" onclick="refreshRealCollections()">Refresh</button>
+            <button class="csv-btn" id="runReminderCycleBtn" onclick="runReminderCycle()">Run reminder cycle</button>
+          </div>
         </div>
         <div class="body">
           <div class="kanban" id="kanban-collections"></div>
@@ -1077,17 +1087,33 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       </div>
 
       <div class="section">
-        <div class="sh"><h3>Dunning cadence</h3><span class="desc">· days past due triggers</span></div>
+        <div class="sh"><h3>Reminder sends</h3><span class="desc">· real -7/0/+14 cadence · what "Run reminder cycle" actually sends</span></div>
+        <div style="padding:10px 18px 0;font-size:12.5px;color:var(--text-2);line-height:1.5">These 3 stages are the only ones that trigger a real email. Each is relative to the invoice's own due date, not days-overdue. There's no per-stage approval gate — clicking "Run reminder cycle" once sends to every real invoice currently due across all 3 stages.</div>
         <div class="body padless">
           <table class="t">
-            <thead><tr><th>Stage</th><th>DPD trigger</th><th>Action</th><th>Approver</th></tr></thead>
+            <thead><tr><th>Stage</th><th>Days vs. due date</th><th>Action</th><th>Approver</th></tr></thead>
             <tbody>
-              <tr><td>Reminder</td><td class="mono">1</td><td>Auto-send friendly reminder</td><td>Auto</td></tr>
-              <tr><td>First notice</td><td class="mono">8</td><td>Auto-send first notice</td><td>Auto</td></tr>
-              <tr><td>Second notice</td><td class="mono">22</td><td>Auto-send · CC deal owner</td><td>Auto</td></tr>
-              <tr><td>Final demand</td><td class="mono">45</td><td>Emma drafts · stages for approval</td><td>Finance lead</td></tr>
-              <tr><td>Escalated</td><td class="mono">60</td><td>Incident: collections_escalation_required</td><td>Human</td></tr>
-              <tr><td>Writeoff review</td><td class="mono">90</td><td>Incident: writeoff_candidate</td><td>Finance lead + controller</td></tr>
+              <tr><td>Pre-due reminder</td><td class="mono">-7</td><td>Auto-sends a real reminder email</td><td>You (via Run reminder cycle)</td></tr>
+              <tr><td>Due-today reminder</td><td class="mono">0</td><td>Auto-sends a real reminder email</td><td>You (via Run reminder cycle)</td></tr>
+              <tr><td>Final notice</td><td class="mono">+14</td><td>Auto-sends a real reminder email</td><td>You (via Run reminder cycle)</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="sh"><h3>Collections board stages</h3><span class="desc">· real DPD buckets · visual column only, not a send trigger</span></div>
+        <div style="padding:10px 18px 0;font-size:12.5px;color:var(--text-2);line-height:1.5">Independent of the reminder sends above — this is purely which column a real overdue invoice sits in on the Collections queue board, based on days-past-due. Reaching a stage doesn't send anything by itself; Escalated and Writeoff review additionally raise a real Incident for a human to review.</div>
+        <div class="body padless">
+          <table class="t">
+            <thead><tr><th>Stage</th><th>DPD trigger</th><th>What happens</th></tr></thead>
+            <tbody>
+              <tr><td>Reminder</td><td class="mono">1</td><td>Moves to this column on the Collections board</td></tr>
+              <tr><td>First notice</td><td class="mono">8</td><td>Moves to this column on the Collections board</td></tr>
+              <tr><td>Second notice</td><td class="mono">22</td><td>Moves to this column on the Collections board</td></tr>
+              <tr><td>Final demand</td><td class="mono">45</td><td>Moves to this column on the Collections board</td></tr>
+              <tr><td>Escalated</td><td class="mono">60</td><td>Moves to this column + raises a real "Collections escalation required" incident</td></tr>
+              <tr><td>Writeoff review</td><td class="mono">90</td><td>Moves to this column + raises a real "Writeoff candidate" incident</td></tr>
             </tbody>
           </table>
         </div>
@@ -1660,8 +1686,12 @@ function getCollections(){
 function getIncidents(){
   if(currentClient==='trade')   return TRADE_INCIDENTS;
   if(currentClient==='halcyon') return HALCYON_INCIDENTS;
-  if(currentClient==='all')     return INCIDENTS.concat(TRADE_INCIDENTS, HALCYON_INCIDENTS);
-  return INCIDENTS;
+  // Real incidents only, same scoping as Deal Pipeline/Cash Application/
+  // Collections/Invoice Pipeline -- REAL_INCIDENTS is derived fresh by
+  // applyRealIncidents() from already-loaded real cash/collections/deal
+  // data, not this page's own pre-existing demo rows.
+  if(currentClient==='all')     return REAL_INCIDENTS.concat(TRADE_INCIDENTS, HALCYON_INCIDENTS);
+  return REAL_INCIDENTS;
 }
 function getAudit(){
   if(currentClient==='trade')   return TRADE_AUDIT.concat(AUDIT.slice(0,4));
@@ -2265,9 +2295,20 @@ async function sendRealInvoiceEmail(invId){
   }
   const seller = sellerFor(inv.linkedDealId);
   const custName = customerFor(inv);
+  // Same fallback as openInvoicePipelineDrawer()'s preview: an empty
+  // inv.lineItems on a recurring multi-period invoice doesn't mean
+  // nothing was extracted (the deal's real pricing table is intact --
+  // just not apportioned per period), so the real emailed PDF needs a
+  // row here too, not a blank table. Previously fell back to [] -- the
+  // actual sent email would have shown zero line items at all.
   const items = (Array.isArray(inv.lineItems) && inv.lineItems.length)
     ? inv.lineItems.map(li=>({desc: li.desc, qty: li.qty, unit: li.unit, amount: li.amount}))
-    : [];
+    : [{
+        desc: inv.seriesCount > 1
+          ? inv.milestone + ' — even split of contract total, see full contract for itemized pricing'
+          : 'Contract total (line items not extracted)',
+        qty: 1, unit: inv.amount, amount: inv.amount
+      }];
   const btn = document.getElementById('realInvSendBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Sending…'; }
   try{
@@ -2290,6 +2331,7 @@ async function sendRealInvoiceEmail(invId){
     });
     const payload = await res.json();
     if(!payload.ok){ toast('warn', 'Send failed: ' + payload.error); if(btn){ btn.disabled=false; btn.textContent='Send invoice'; } return; }
+    const invBefore = {stage: inv.stage, sentAt: inv.sentAt || null, sentTo: inv.sentTo || null};
     inv.stage = 'sent';
     inv.sentAt = new Date().toISOString();
     inv.messageId = payload.messageId;
@@ -2298,7 +2340,9 @@ async function sendRealInvoiceEmail(invId){
       AUDIT.unshift({
         ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
         ev: 'invoice_sent', ent: 'invoice', actor: 'Alex Rivera',
-        target: inv.id, rationale: 'Emailed to ' + payload.to
+        target: inv.id, rationale: 'Emailed to ' + payload.to,
+        before: invBefore,
+        after: {stage: inv.stage, sentAt: inv.sentAt, sentTo: inv.sentTo}
       });
     }
     renderInvoicePipeline();
@@ -2315,6 +2359,7 @@ async function sendRealInvoiceEmail(invId){
 
 function approveDeal(id){
   const d = findDeal(id); if(!d) return;
+  const dealReviewBefore = d.review;
   d.review = 'approved';
   if(d.real){
     const invs = createOrUpdateInvoiceFromDeal(d);
@@ -2325,15 +2370,19 @@ function approveDeal(id){
         ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
         target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
           ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
-          : 'invoice autofilled from extracted contract terms')
+          : 'invoice autofilled from extracted contract terms'),
+        before: {dealId: d.id, review: dealReviewBefore},
+        after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
       });
     }
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
     renderPipeline();
     renderInvoicePipeline();
     if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
     if(typeof renderSchedule === 'function') renderSchedule();
     if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
     if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
+    if(typeof applyRealIncidents === 'function') applyRealIncidents();
     const msg = invs.length > 1
       ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
       : `Approved · ${first.id} created from contract, staged in Draft`;
@@ -2459,13 +2508,22 @@ function saveDealEdits(id){
   const fieldList = changed.length ? changed.join(', ') : 'no changes';
 
   if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+    const after = {
+      amt: d.amt, terms: d.terms, c: d.c, owner: d.owner,
+      termMonths: d.termMonths, autoRenew: d.autoRenew, invoicingSchedule: d.invoicingSchedule,
+      party_from: d.contract && d.contract.party_from,
+      party_to: d.contract && d.contract.party_to,
+      signatories: d.contract && d.contract.signatories ? d.contract.signatories.slice() : null,
+      lineItems: (d.lineItems||[]).map(li=>({...li}))
+    };
     AUDIT.unshift({
       ts: d.real ? _realNowStamp() : (typeof nowStamp === 'function' ? nowStamp(0) : '2026-09-15'),
       ev: 'deal_terms_edited',
       ent: 'deal',
       actor: 'Alex Rivera',
       target: d.id,
-      rationale: 'Edited parsed terms · ' + fieldList
+      rationale: 'Edited parsed terms · ' + fieldList,
+      ...(d.real ? {before, after} : {})
     });
   }
   openDealDrawer(id, false);
@@ -2475,26 +2533,6 @@ function saveDealEdits(id){
 
 function cancelDealEdits(id){
   openDealDrawer(id, false);
-}
-
-/* =====================================================================
-   RENDER: Approvals
-   ===================================================================== */
-function renderApprovals(){
-  const tb = document.querySelector('#tbl-approval tbody');
-  const rows = getApprovals();
-  tb.innerHTML = rows.map(a=>{
-    const tier = amtTier(a.amt);
-    return `<tr onclick="openApprovalDrawer('${a.inv}')">
-      <td class="mono">${a.inv}</td>
-      <td>${a.c}</td>
-      <td class="amt-cell ${tier}">${money(a.amt)}</td>
-      <td class="mono">${a.deal}</td>
-      <td>${a.approver}</td>
-      <td class="num">${a.age}</td>
-      <td style="color:var(--text-3)">${a.esc}</td>
-    </tr>`;
-  }).join('') || `<tr><td colspan="7" class="empty">No approvals pending for this client</td></tr>`;
 }
 
 /* =====================================================================
@@ -2747,7 +2785,16 @@ function openInvoicePipelineDrawer(id){
   const items = (Array.isArray(inv.lineItems) && inv.lineItems.length)
     ? inv.lineItems.map(li=>({ desc: li.desc, dateRange: '', qty: li.qty, unit: li.unit, amount: li.amount }))
     : (inv.real
-        ? [{ desc: 'Contract total (line items not extracted)', dateRange: 'Due ' + inv.dueDate, qty:1, unit:inv.amount, amount:inv.amount }]
+        // A recurring multi-period invoice (seriesCount > 1) genuinely did
+        // have real line items extracted from the contract -- they just
+        // aren't apportioned per period (createOrUpdateInvoiceFromDeal()
+        // splits the total evenly instead of guessing which line item
+        // belongs to which installment). "Not extracted" would be a lie
+        // here; reuse the already-correct milestone text instead (e.g.
+        // "Recurring monthly invoice 18 of 18"), which is only genuinely
+        // true for a real single-shot invoice where no pricing table
+        // existed in the contract at all.
+        ? [{ desc: (inv.seriesCount > 1 ? inv.milestone + ' — even split of contract total, see full contract for itemized pricing' : 'Contract total (line items not extracted)'), dateRange: 'Due ' + inv.dueDate, qty:1, unit:inv.amount, amount:inv.amount }]
         : [{ desc: inv.milestone, dateRange: 'Due ' + inv.dueDate, qty:1, unit:inv.amount, amount:inv.amount }]);
   // Real invoices get an honest send section: the real extracted billing
   // email pre-filled (never the fabricated ap@<slug>.com billToFor() uses
@@ -2828,7 +2875,8 @@ function renderIncidents(){
   const q = document.getElementById('incSearch').value.toLowerCase();
   const tf = document.getElementById('incTypeF').value;
   const sf = document.getElementById('incStatusF').value;
-  const rows = getIncidents().filter(i=>{
+  const all = getIncidents();
+  const rows = all.filter(i=>{
     if(tf && i.type!==tf) return false;
     if(sf && i.st!==sf) return false;
     if(q && !(i.id+' '+i.c+' '+i.type+' '+(i.inv||'')).toLowerCase().includes(q)) return false;
@@ -2836,17 +2884,27 @@ function renderIncidents(){
   });
   document.getElementById('incCount').textContent = rows.length + ' incidents';
   const tb = document.querySelector('#tbl-incidents tbody');
+  // Distinguish "genuinely nothing real to flag" from "filters hid
+  // existing rows" -- the old single message made an honest-empty real
+  // result (every real DPD/confidence/match signal within normal range)
+  // read like a filter mistake instead of a clean state.
+  const emptyMsg = all.length === 0
+    ? (currentClient === 'rally'
+        ? 'No real incidents right now — every real signal (overdue DPD, unmatched cash, extraction confidence) is within normal range'
+        : 'No incidents')
+    : 'No incidents match filters';
   tb.innerHTML = rows.map(i=>{
     const stColor = i.st==='resolved'?'green':i.st==='awaiting_approval'?'amber':'red';
+    const liveChip = i.real ? ' <span class="pill green dot" style="font-size:9.5px;margin-left:4px">Live</span>' : '';
     return `<tr onclick="openIncidentDrawer('${i.id}')">
       <td class="mono">${i.id}</td>
       <td><span class="pill purple">${i.type}</span></td>
-      <td>${i.c}</td>
+      <td>${i.c}${liveChip}</td>
       <td><span class="pill ${stColor} dot">${i.st}</span></td>
       <td>${i.h}</td>
       <td class="num">${i.age}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" class="empty">No incidents match filters</td></tr>`;
+  }).join('') || `<tr><td colspan="6" class="empty">${emptyMsg}</td></tr>`;
 }
 ['incSearch','incTypeF','incStatusF'].forEach(id=>document.getElementById(id).addEventListener('input', renderIncidents));
 
@@ -2889,11 +2947,20 @@ function renderAudit(){
 }
 function expandAudit(row,i){
   const a = (window.__auditRows||AUDIT)[i]; if(!a) return;
-  const before = JSON.stringify({status:'previous',ts:a.ts.slice(0,10),target:a.target},null,2);
-  const after  = JSON.stringify({status:a.ev,ts:a.ts,target:a.target,actor:a.actor,rationale:a.rationale},null,2);
+  // Real audit entries (approveDeal/sendRealInvoiceEmail/saveDealEdits/
+  // snoozeScheduledInvoice) attach genuine before/after state captured at
+  // the moment of the mutation. The ~30 fabricated demo rows never had
+  // real state to capture, so they fall back to the old illustrative
+  // placeholder -- never shown for a real row, since a.before always
+  // exists there.
+  const hasReal = a.before !== undefined || a.after !== undefined;
+  const beforeLabel = hasReal ? 'Before (real)' : 'Before snapshot (illustrative)';
+  const afterLabel = hasReal ? 'After (real)' : 'After snapshot (illustrative)';
+  const before = JSON.stringify(hasReal ? (a.before ?? {}) : {status:'previous',ts:a.ts.slice(0,10),target:a.target}, null, 2);
+  const after  = JSON.stringify(hasReal ? (a.after ?? {})  : {status:a.ev,ts:a.ts,target:a.target,actor:a.actor,rationale:a.rationale}, null, 2);
   openDrawer('Audit event · '+a.ev, `${a.actor} · ${a.target} · ${a.ts}`, `
-    <div class="dsec"><h4>Before snapshot</h4><div class="jsonbox">${before}</div></div>
-    <div class="dsec"><h4>After snapshot</h4><div class="jsonbox">${after}</div></div>
+    <div class="dsec"><h4>${beforeLabel}</h4><div class="jsonbox">${before}</div></div>
+    <div class="dsec"><h4>${afterLabel}</h4><div class="jsonbox">${after}</div></div>
     <div class="dsec"><h4>Context</h4><div style="font-size:12.5px;color:var(--text-2)">${a.rationale}</div></div>
   `, `<button class="btn" onclick="closeDrawer()">Close</button>`);
 }
@@ -2993,7 +3060,22 @@ function openContractModal(dealId){
     // modal an explicit height here so the iframe actually expands.
     if(modal) modal.style.height = 'calc(100vh - 60px)';
     foot.style.display = 'none';
-    body.innerHTML = `<iframe src="/api/deals/${dealId}/pdf" title="${c.filename}" style="width:100%;height:100%;border:0;background:#fff"></iframe>`;
+    // The first view of a real contract can genuinely take up to a minute
+    // (a live two-hop HubSpot fetch -- see _serve_deal_pdf()'s caching
+    // comment); with no feedback a blank modal for that long looks frozen
+    // rather than working. The overlay sits on top of the iframe and the
+    // iframe's own onload (fires on success or on the server's error
+    // response alike) removes it the moment anything actually arrives --
+    // cached views remove it almost instantly, same code path either way.
+    body.innerHTML = `
+      <div style="position:relative;width:100%;height:100%">
+        <div id="pdfLoadingMsg" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:#fff;color:var(--text-2);font-size:13px;text-align:center;padding:0 24px">
+          <span style="width:10px;height:10px;border-radius:50%;background:var(--purple);animation:pulse 1.2s infinite"></span>
+          <div>Fetching real contract from HubSpot…</div>
+          <div style="font-size:11.5px;color:var(--text-3)">First view of a large contract can take up to a minute — instant after that</div>
+        </div>
+        <iframe src="/api/deals/${dealId}/pdf" title="${c.filename}" style="width:100%;height:100%;border:0;background:#fff" onload="document.getElementById('pdfLoadingMsg')?.remove()"></iframe>
+      </div>`;
     bd.classList.add('open');
     return;
   }
@@ -3471,7 +3553,7 @@ function incidentSource(i){
   };
   if(stubs[i.id]) return stubs[i.id];
   // Fallback based on incident type
-  return {kind:'system',system:'Emma',event:i.src||'system event',received:'today',
+  return {kind:'system',system:'Emma',event:i.src||'system event',received:(i.real && i.age) ? i.age+' ago' : 'today',
     payload:JSON.stringify({incident:i.id,type:i.type,customer:i.c,invoice:i.inv||null},null,2)};
 }
 
@@ -3700,8 +3782,15 @@ function sendReminderNow(inv){
 function suggestedReplyForIncident(i){
   if(i.type==='invoice_dispute') return "Hi "+i.c+" team,\n\nThanks for the note on "+i.inv+". Collections is paused while we investigate. Can we set up a 15 minute call this week to walk through the line items in dispute?\n\nEmma (on behalf of Rally UXR)";
   if(i.type==='payment_unmatched') return "Hi,\n\nWe received a payment we could not match to an open invoice. Could you confirm the memo and remittance detail so we can apply it correctly?\n\nEmma (on behalf of Rally UXR)";
-  if(i.type==='deal_missing_signed_pdf') return "Hi "+i.h+",\n\nHubSpot deal "+i.deal+" shows closedwon but there is no signed_agreement on the record. Could you upload it or point us to the file? Invoice generation is paused until then.\n\nEmma";
-  if(i.type==='deal_low_confidence_extraction') return "Hi "+i.h+",\n\nOCR extraction on the contract for "+i.c+" came back at 0.72 confidence, below our 0.85 threshold. Please review the parsed fields before we proceed.\n\nEmma";
+  if(i.type==='deal_missing_signed_pdf'){
+    const who = i.real ? 'team' : i.h;
+    return "Hi "+who+",\n\nHubSpot deal "+i.deal+" shows closedwon but there is no signed agreement on the record. Could you upload it or point us to the file? Invoice generation is paused until then.\n\nEmma";
+  }
+  if(i.type==='deal_low_confidence_extraction'){
+    const who = i.real ? 'team' : i.h;
+    const confN = i.real && typeof i.conf === 'number' ? i.conf.toFixed(2) : '0.72';
+    return "Hi "+who+",\n\nExtraction on the contract for "+i.c+" came back at "+confN+" confidence, below our 0.85 threshold. Please review the parsed fields before we proceed.\n\nEmma";
+  }
   if(i.type==='invoice_delivery_failed') return "Hi "+i.c+" team,\n\nOur last delivery of "+i.inv+" bounced. Could you confirm the current AP inbox so we can resend?\n\nEmma";
   if(i.type==='payment_overpaid') return "Hi "+i.c+" team,\n\nWe received a payment that came in $200 above the invoice total on "+i.inv+". Would you like the difference credited to the next invoice or refunded?\n\nEmma";
   if(i.type==='invoice_rejected') return "Hi "+i.h+",\n\nRegenerating "+i.inv+" with the corrected line item now. Will resurface for approval shortly.\n\nEmma";
@@ -3742,53 +3831,84 @@ function incidentPriority(i){
 }
 function plainEventDescription(i){
   const t=i.type, c=i.c, inv=i.inv, deal=i.deal, amt=money(i.amt||0);
-  if(t==='writeoff_candidate') return `Emma advanced ${c} to writeoff review after ${inv} sat 92 days past due at ${amt}. Waiting on a lead to approve the writeoff, extend cadence, or reverse.`;
-  if(t==='collections_escalation_required') return `Emma escalated ${c} to human review after ${inv} crossed 60 days past due at ${amt}. Six dunning attempts sent with no reply.`;
+  if(t==='writeoff_candidate'){
+    const dpdN = i.real && typeof i.dpd === 'number' ? i.dpd : 92;
+    return `Emma advanced ${c} to writeoff review after ${inv} sat ${dpdN} days past due at ${amt}. Waiting on a lead to approve the writeoff, extend cadence, or reverse.`;
+  }
+  if(t==='collections_escalation_required'){
+    const dpdN = i.real && typeof i.dpd === 'number' ? i.dpd : 60;
+    return `Emma escalated ${c} to human review after ${inv} crossed ${dpdN} days past due at ${amt}.` + (i.real ? '' : ' Six dunning attempts sent with no reply.');
+  }
   if(t==='dunning_stage_advance') return `Emma advanced ${c} to the next dunning stage on schedule for ${inv} (${amt}).`;
-  if(t==='payment_unmatched') return `QuickBooks received a payment of ${amt} that Emma could not confidently match to an open invoice. Match confidence came in below the 0.85 threshold.`;
+  if(t==='payment_unmatched') return i.real
+    ? `QuickBooks received a payment of ${amt} from ${c} with no linked invoice. No automated matching exists yet, so Emma held it for a manual match.`
+    : `QuickBooks received a payment of ${amt} that Emma could not confidently match to an open invoice. Match confidence came in below the 0.85 threshold.`;
   if(t==='payment_overpaid') return `QuickBooks received a payment against ${inv} that came in $200 above the invoice total ($3,200). Waiting on a lead to credit next invoice or refund.`;
   if(t==='payment_received') return `QuickBooks confirmed ${amt} received on ${inv} for ${c}. Emma applied it automatically.`;
   if(t==='invoice_delivery_failed') return `Delivery of ${inv} to ${c} bounced (mailbox full). Emma is holding a resend until AP confirms a new inbox.`;
   if(t==='invoice_rejected') return `${c}'s approver rejected ${inv} with the reason: line item 3 quantity wrong. Emma paused sending and is drafting a v2.`;
   if(t==='deal_missing_signed_pdf') return `HubSpot deal ${deal} for ${c} moved to closed-won but no signed contract is attached. Emma paused invoice generation.`;
   if(t==='deal_ambiguous_pdf') return `Two signed PDFs are attached to ${deal}. Emma paused extraction until the owner confirms which one to use for invoicing.`;
-  if(t==='deal_low_confidence_extraction') return `OCR extraction on the ${c} contract came back at 0.72 confidence — below the 0.85 threshold. Emma flagged it for review before invoicing.`;
+  if(t==='deal_low_confidence_extraction'){
+    const confN = i.real && typeof i.conf === 'number' ? i.conf.toFixed(2) : '0.72';
+    return `Extraction on the ${c} contract came back at ${confN} confidence — below the 0.85 threshold. Emma flagged it for review before invoicing.`;
+  }
   if(t==='invoice_sent') return `Emma sent ${inv} to ${c} for ${amt}. Delivery acknowledged by portal.`;
   if(t==='invoice_awaiting_approval') return `${inv} for ${c} at ${amt} cleared the auto-approve threshold, so Emma routed it to ${i.h} for a decision.`;
   return `${incidentFriendlyType(t)} on ${c}${inv&&inv!=='—'?' · '+inv:''}.`;
 }
 function emmaPriorActions(i){
   const t=i.type;
-  if(t==='writeoff_candidate') return [
-    'Sent friendly reminder on Jun 15 (invoice due date).',
-    'Sent first, second and final-demand notices on Days 8, 22 and 45.',
-    'Escalated the invoice at Day 60 with no reply from ' + i.c + ' AP.',
-    'Sent writeoff-review notice on Day 90 · still no reply.',
-    'Paused further dunning attempts pending a human decision.'];
+  if(t==='writeoff_candidate'){
+    if(i.real) return [
+      i.inv + ' is ' + (typeof i.dpd === 'number' ? i.dpd : '90+') + ' days past due per QuickBooks, past the writeoff-review threshold.',
+      'Held for a human decision: approve the writeoff, extend the cadence, or reverse.'];
+    return [
+      'Sent friendly reminder on Jun 15 (invoice due date).',
+      'Sent first, second and final-demand notices on Days 8, 22 and 45.',
+      'Escalated the invoice at Day 60 with no reply from ' + i.c + ' AP.',
+      'Sent writeoff-review notice on Day 90 · still no reply.',
+      'Paused further dunning attempts pending a human decision.'];
+  }
   if(t==='invoice_dispute') return [
     'Detected dispute intent in the customer reply from ap@meridian.com.',
     'Paused Ramp’s collections cadence on ' + i.inv + '.',
     'Notified ' + (i.h||'the assignee') + ' and opened this incident.',
     'Held further dunning until a Rally lead reviews the disputed lines.'];
-  if(t==='payment_unmatched') return [
-    'Ran a fuzzy match against open invoices for the paying party.',
-    'Confidence came back below the 0.85 threshold (0.62).',
-    'Suggested the top 3 candidate invoices for a human pick.',
-    'Held the payment on the unmatched queue pending decision.'];
+  if(t==='payment_unmatched'){
+    if(i.real) return [
+      'QuickBooks recorded this payment with no LinkedTxn to any invoice.',
+      'No automated fuzzy-matching exists yet, so Emma could not suggest a candidate invoice.',
+      'Held the payment on the unmatched queue pending a manual match.'];
+    return [
+      'Ran a fuzzy match against open invoices for the paying party.',
+      'Confidence came back below the 0.85 threshold (0.62).',
+      'Suggested the top 3 candidate invoices for a human pick.',
+      'Held the payment on the unmatched queue pending decision.'];
+  }
   if(t==='payment_overpaid') return [
     'Matched the payment to ' + i.inv + ' on memo.',
     'Flagged the $200 delta for a human decision: credit the next invoice or refund.'];
-  if(t==='deal_missing_signed_pdf') return [
-    'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
-    'Checked the deal record for signed_agreement — none attached.',
-    'Paused invoice generation and pinged the deal owner.'];
+  if(t==='deal_missing_signed_pdf'){
+    if(i.real) return [
+      'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
+      'Checked the deal record for a signed agreement — none attached.',
+      'Paused invoice generation until a signed contract is attached in HubSpot.'];
+    return [
+      'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
+      'Checked the deal record for signed_agreement — none attached.',
+      'Paused invoice generation and pinged the deal owner.'];
+  }
   if(t==='deal_ambiguous_pdf') return [
     'Found two signed PDFs on the deal record (MSA_v2 and Order form).',
     'Paused extraction until the owner picks the source of truth.'];
-  if(t==='deal_low_confidence_extraction') return [
-    'Extracted contract fields at 0.72 confidence.',
-    'Compared to the 0.85 threshold — below.',
-    'Held the deal for review before invoicing.'];
+  if(t==='deal_low_confidence_extraction'){
+    const confN = i.real && typeof i.conf === 'number' ? i.conf.toFixed(2) : '0.72';
+    return [
+      'Extracted contract fields at ' + confN + ' confidence.',
+      'Compared to the 0.85 threshold — below.',
+      'Held the deal for review before invoicing.'];
+  }
   if(t==='invoice_delivery_failed') return [
     'Sent ' + i.inv + ' to the last-known AP inbox for ' + i.c + '.',
     'Received a 5.2.2 mailbox-full bounce.',
@@ -3822,7 +3942,7 @@ function suggestedNextAction(i){
 }
 function plainAuditFeed(i){
   const rows = [];
-  if(i.type==='writeoff_candidate'){
+  if(i.type==='writeoff_candidate' && !i.real){
     rows.push({when:'Jun 15, 09:00', who:'Emma', kind:'emma', txt:'Sent friendly reminder to Vantage AP on the invoice due date.'});
     rows.push({when:'Jun 22, 09:00', who:'Emma', kind:'emma', txt:'Sent Day 8 first notice · no reply.'});
     rows.push({when:'Jul 06, 09:00', who:'Emma', kind:'emma', txt:'Sent Day 22 second notice · no reply.'});
@@ -3835,13 +3955,13 @@ function plainAuditFeed(i){
     rows.push({when:'Sep 15, 06:14', who:'Emma', kind:'emma', txt:'Reply classifier detected dispute intent · confidence 0.94.'});
     rows.push({when:'Sep 15, 06:15', who:'Emma', kind:'emma', txt:'Paused Ramp collections cadence on '+i.inv+'.'});
     rows.push({when:'Sep 15, 06:15', who:'Emma', kind:'emma', txt:'Opened incident and routed to '+i.h+' for review.'});
-  } else if(i.type==='payment_unmatched'){
+  } else if(i.type==='payment_unmatched' && !i.real){
     rows.push({when:'Sep 15, 01:34', who:'System', kind:'sys', txt:'QuickBooks received '+money(i.amt)+' with memo "wire ref 3388-A".'});
     rows.push({when:'Sep 15, 01:34', who:'Emma', kind:'emma', txt:'Ran fuzzy match · best candidate 0.62 (below 0.85 threshold).'});
     rows.push({when:'Sep 15, 01:35', who:'Emma', kind:'emma', txt:'Suggested top 3 open invoices for a human to pick.'});
   } else {
     rows.push({when:i.age+' ago', who:'Emma', kind:'emma', txt:'Detected '+incidentFriendlyType(i.type)+' on '+i.c+' and opened this incident.'});
-    rows.push({when:'seconds later', who:'Emma', kind:'emma', txt:'Classified type · confidence 0.94.'});
+    if(!i.real) rows.push({when:'seconds later', who:'Emma', kind:'emma', txt:'Classified type · confidence 0.94.'});
     rows.push({when:'+1s', who:'Emma', kind:'emma', txt:'Loaded context · invoice '+(i.inv||'—')+' · deal '+(i.deal||'—')+' · amount '+money(i.amt||0)+'.'});
     if(i.st==='resolved'){
       rows.push({when:'later', who:i.h, kind:'human', txt:'Decision recorded · action taken.'});
@@ -4643,6 +4763,12 @@ let SENT_REMINDERS_THIS_SESSION = [];
 // so the Team of agents cards can show a genuine "last run" time instead of
 // a fixed fake one.
 let REAL_COMPUTED_AT = {deals: null, cash: null, collections: null, invoicing: null};
+// Deals compute_deals() couldn't build an invoice for this round, with a
+// machine-readable reason (e.g. "no_agreement" -- no signed contract
+// attached at all) -- captured by loadRealDeals() so applyRealIncidents()
+// can surface the ones worth a human's attention instead of the deal
+// just silently never appearing anywhere.
+let REAL_DEALS_SKIPPED = [];
 
 function applyClient(){
   const p = CLIENT_PROFILES[currentClient];
@@ -4986,6 +5112,162 @@ function applyRealAgentCards(){
     if(lr) lr.textContent = _timeAgo(REAL_COMPUTED_AT.collections);
     if(inc) inc.textContent = SENT_REMINDERS_THIS_SESSION.length + ' real reminder' + (SENT_REMINDERS_THIS_SESSION.length===1?'':'s') + ' sent · ' + overdue + ' real invoice' + (overdue===1?'':'s') + ' overdue';
   }
+}
+
+// Loose match key for a customer name, mirroring server.py's
+// _normalize_customer_name exactly (lowercase, strip punctuation, strip
+// common legal suffixes) -- needed here because a QBO payment's
+// customer name and this app's extracted customer_legal_name are never
+// guaranteed byte-for-byte identical.
+function _normCustomerNameJs(name){
+  if(!name) return '';
+  let n = String(name).toLowerCase().replace(/[,.]/g,'').trim();
+  const suffixes = [' inc',' llc',' corp',' corporation',' ltd',' co',' partners',' solutions',' group'];
+  for(const suf of suffixes){
+    if(n.endsWith(suf)) n = n.slice(0, -suf.length).trim();
+  }
+  return n;
+}
+
+// Auto-marks a real Invoice Pipeline invoice 'paid' once QuickBooks' own
+// Payment.LinkedTxn (CASH_MATCHED, an authoritative fact from QBO, not a
+// guess) shows a payment came in for that customer. There is no invoice-id
+// linkage to lean on -- the human-created QBO invoice has its own
+// DocNumber, unrelated to this app's INV-* ids -- so matching is by
+// customer name, disambiguated by amount when a customer has more than
+// one open invoice. If amount still doesn't uniquely identify one (e.g.
+// several same-size recurring periods), the earliest-due-date invoice is
+// assumed paid first (a disclosed FIFO assumption, not a fabricated
+// value); genuinely ambiguous cases are left alone rather than guessed.
+// A payment smaller than the invoice it would otherwise match (a partial
+// payment, already surfaced honestly in Cash Application's own "Partial"
+// bucket) never marks that invoice paid -- only a payment that actually
+// covers the invoice amount does.
+function applyRealCashToInvoices(){
+  if(currentClient !== 'rally') return;
+  if(!CASH_MATCHED.length) return;
+  const pool = INVOICE_PIPELINE.rally;
+  const openByCustomer = new Map();
+  for(const inv of pool){
+    if(!inv.real || inv.stage === 'paid') continue;
+    const key = _normCustomerNameJs(customerFor(inv));
+    if(!key) continue;
+    if(!openByCustomer.has(key)) openByCustomer.set(key, []);
+    openByCustomer.get(key).push(inv);
+  }
+  for(const p of CASH_MATCHED){
+    if(!p.real) continue;
+    const key = _normCustomerNameJs(p.c);
+    const open = openByCustomer.get(key);
+    if(!open || !open.length) continue;
+
+    let target;
+    if(open.length === 1){
+      // A payment smaller than this invoice is a partial payment, not a
+      // payoff -- don't mark the whole thing paid on partial money.
+      target = (p.amt >= open[0].amount - 0.01) ? open[0] : null;
+    } else {
+      const byAmount = open.filter(inv => Math.abs(inv.amount - p.amt) < 0.01);
+      target = byAmount.length === 1 ? byAmount[0]
+        : byAmount.length > 1 ? byAmount.slice().sort((a,b)=>new Date(a.dueDate)-new Date(b.dueDate))[0]
+        : null;
+    }
+    if(!target) continue; // ambiguous, or payment doesn't cover the invoice -- don't guess
+
+    const before = {stage: target.stage};
+    target.stage = 'paid';
+    target.paidVia = 'QBO payment ' + (p.qb || '—') + (p.when ? ' · ' + p.when : '');
+    if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+      AUDIT.unshift({
+        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
+        ev: 'invoice_auto_marked_paid', ent: 'invoice', actor: 'Emma',
+        target: target.id, rationale: 'QuickBooks payment ' + (p.qb || '—') + ' matched to ' + p.c,
+        before, after: {stage: target.stage, paidVia: target.paidVia}
+      });
+    }
+    const idx = open.indexOf(target);
+    if(idx > -1) open.splice(idx, 1); // don't let a second matched payment for the same customer re-claim it
+  }
+}
+
+// Real incidents -- derived fresh every time from real cash/collections/
+// deal data already loaded elsewhere, never persisted. An incident
+// disappears the moment its underlying real condition clears (a payment
+// gets matched, DPD drops back under the threshold, a deal gets
+// re-extracted above 0.85 confidence) rather than needing an explicit
+// "resolved" action nothing in the app can actually perform yet -- so
+// every real row is always st:'held_for_review' and h:'Emma', honestly,
+// since there's no real human-assignment system built.
+let REAL_INCIDENTS = [];
+
+function _compactAge(fromUnixSeconds){
+  if(!fromUnixSeconds) return '—';
+  const mins = Math.max(0, Math.round((Date.now()/1000 - fromUnixSeconds) / 60));
+  if(mins < 60) return mins + 'm';
+  const hrs = Math.round(mins / 60);
+  if(hrs < 24) return hrs + 'h';
+  return Math.round(hrs / 24) + 'd';
+}
+
+function applyRealIncidents(){
+  if(currentClient !== 'rally') return;
+  const rows = [];
+
+  // Unmatched real cash -- QuickBooks received a payment with no
+  // LinkedTxn to any invoice. conf is honestly 0.0 (no fuzzy-matching
+  // algorithm exists), never a fabricated near-miss score.
+  for(const c of CASH_UNMATCHED.filter(x=>x.real)){
+    rows.push({
+      id: 'INC-REAL-CASH-' + c.qb, type: 'payment_unmatched',
+      c: c.c, st: 'held_for_review', h: 'Emma',
+      age: _compactAge(REAL_COMPUTED_AT.cash),
+      src: 'QuickBooks payment event', amt: c.amt, inv: '—', deal: '—',
+      real: true, conf: typeof c.conf === 'number' ? c.conf : 0
+    });
+  }
+
+  // Real overdue invoices past the escalation/writeoff thresholds --
+  // dpd is itself the real, meaningful "how long has this been a
+  // problem" figure, already computed from the invoice's real due date.
+  for(const c of COLLECTIONS.filter(x=>x.real)){
+    const dpd = Number(c.dpd) || 0;
+    if(dpd > 90){
+      rows.push({id:'INC-REAL-COLL-'+c.inv, type:'writeoff_candidate', c:c.c, st:'held_for_review', h:'Emma',
+        age: dpd+'d', src:'Dunning stage: writeoff_review (DPD '+dpd+')', amt:c.amt, inv:c.inv, deal:'—', real:true, dpd});
+    } else if(dpd > 60){
+      rows.push({id:'INC-REAL-COLL-'+c.inv, type:'collections_escalation_required', c:c.c, st:'held_for_review', h:'Emma',
+        age: dpd+'d', src:'Dunning stage: escalated (DPD '+dpd+')', amt:c.amt, inv:c.inv, deal:'—', real:true, dpd});
+    }
+  }
+
+  // Real deals whose extraction succeeded but landed below the 0.85
+  // confidence threshold -- conf is the actual number the LLM reported
+  // for this deal, not a fabricated stand-in.
+  for(const d of DEALS.filter(x=>x.real)){
+    if(typeof d.conf === 'number' && d.conf < 0.85){
+      rows.push({id:'INC-REAL-DEAL-'+d.id, type:'deal_low_confidence_extraction', c:d.c, st:'held_for_review', h:'Emma',
+        age: _compactAge(REAL_COMPUTED_AT.deals), src:'PDF extraction confidence '+d.conf.toFixed(2)+' (below 0.85)',
+        amt:d.amt, inv:'—', deal:d.id, real:true, conf:d.conf});
+    }
+  }
+
+  // Real HubSpot deals closed-won with no signed contract attached at
+  // all -- server.py used to just silently drop these before they ever
+  // reached the frontend. Only "no_agreement" becomes an incident here;
+  // "extraction_error" (e.g. a Groq rate limit) already has its own
+  // recovery path (last known-good extraction) and isn't itself a real
+  // action item the way a genuinely missing contract is.
+  for(const s of REAL_DEALS_SKIPPED){
+    if(s.kind !== 'no_agreement') continue;
+    rows.push({id:'INC-REAL-NOPDF-'+s.dealId, type:'deal_missing_signed_pdf', c:s.name, st:'held_for_review', h:'Emma',
+      age: _compactAge(REAL_COMPUTED_AT.deals), src:'HubSpot deal closed-won · no signed agreement attached',
+      amt: s.amount || 0, inv:'—', deal:s.dealId, real:true});
+  }
+
+  REAL_INCIDENTS = rows;
+  if(currentClient === 'rally' && typeof renderIncidents === 'function') renderIncidents();
+  const nav = document.getElementById('navIncidentsCount');
+  if(nav) nav.textContent = rows.length;
 }
 
 /* Jump to a tab from any card in the workspace */
@@ -5342,13 +5624,16 @@ function snoozeScheduledInvoice(id){
   if(realInv && realInv.real){
     const reason = prompt('Snooze reason (pushes the real invoice\'s due date back 7 days, logged to audit):', 'Client requested delay');
     if(reason === null) return;
+    const dueDateBefore = realInv.dueDate;
     const d = parseDate(realInv.dueDate);
     d.setDate(d.getDate() + 7);
     realInv.dueDate = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
         ts: _realNowStamp(), ev: 'invoice_snoozed', ent: 'invoice', actor: 'Alex Rivera',
-        target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate
+        target: realInv.id, rationale: (reason.trim() || 'Snoozed 7 days') + ' · new due date ' + realInv.dueDate,
+        before: {dueDate: dueDateBefore},
+        after: {dueDate: realInv.dueDate}
       });
     }
     toast('success','Snoozed ' + realInv.id + ' by 7 days · reason logged');
@@ -5552,6 +5837,7 @@ async function loadRealDeals(refresh){
     for(let i = DEALS.length - 1; i >= 0; i--){ if(DEALS[i].real) DEALS.splice(i, 1); }
     DEALS.unshift(...payload.deals);
     REAL_COMPUTED_AT.deals = payload.computed_at || REAL_COMPUTED_AT.deals;
+    REAL_DEALS_SKIPPED = payload.skipped || [];
     renderPipeline();
     applyRealOverviewKpis();
     applyRealOverviewAttentionKpi();
@@ -5559,12 +5845,30 @@ async function loadRealDeals(refresh){
     applyRealRenewals();
     applyRealScheduledInvoices();
     applyRealAgentCards();
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
+    renderInvoicePipeline();
+    if(typeof applyRealIncidents === 'function') applyRealIncidents();
     if(payload.deals.length){
       const staleNote = payload.error ? ' (showing last successful extraction, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', payload.deals.length + ' real HubSpot deal(s) loaded' + staleNote);
     }
   }catch(e){
     toast('warn', 'Could not reach the live deals API — is server.py running? (' + e.message + ')');
+  }
+}
+
+// Re-extracting a changed contract through the LLM (compute_deals()'s
+// skip-if-unchanged path only re-runs deals whose agreementRef changed)
+// can take noticeably longer than the cash/collections refreshes, so
+// this button staying disabled and saying "Refreshing…" for a while is
+// expected, not stuck.
+async function refreshRealDeals(){
+  const btn = document.getElementById('btnRefreshDeals');
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try{
+    await loadRealDeals(true);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Refresh'; }
   }
 }
 
@@ -5588,16 +5892,35 @@ async function loadRealCash(refresh){
     CASH_UNMATCHED.unshift(...(payload.unmatched || []));
     CASH_PARTIAL.unshift(...(payload.partial || []));
     REAL_COMPUTED_AT.cash = payload.computed_at || REAL_COMPUTED_AT.cash;
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
     const activeTab = document.querySelector('#cash-tabs .subtab.active');
     renderCash(activeTab ? activeTab.dataset.cashtab : 'matched');
     if(typeof renderReconTiles === 'function') renderReconTiles();
+    renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
     applyRealAgentCards();
+    if(typeof applyRealIncidents === 'function') applyRealIncidents();
     if(total){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', total + ' real QuickBooks payment/invoice record(s) loaded' + staleNote);
     }
   }catch(e){
     toast('warn', 'Could not reach the live cash API — is server.py running? (' + e.message + ')');
+  }
+}
+
+// Shared by both the Cash Application and Invoice Pipeline "Refresh"
+// buttons -- loadRealCash() already re-runs applyRealCashToInvoices()
+// and renderInvoicePipeline(), so either button forces the same fresh
+// QuickBooks pull and the same auto-mark-paid recheck.
+async function refreshRealCash(btnId){
+  const btn = document.getElementById(btnId || 'btnRefreshCash');
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try{
+    await loadRealCash(true);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Refresh'; }
   }
 }
 
@@ -5618,12 +5941,23 @@ async function loadRealCollections(refresh){
     applyRealOverviewAttentionKpi();
     applyRealMorningBrief();
     applyRealAgentCards();
+    if(typeof applyRealIncidents === 'function') applyRealIncidents();
     if(list.length){
       const staleNote = payload.error ? ' (showing last successful pull, refresh failed)' : '';
       toast(payload.error ? 'warn' : 'success', list.length + ' real overdue invoice(s) loaded' + staleNote);
     }
   }catch(e){
     toast('warn', 'Could not reach the live collections API — is server.py running? (' + e.message + ')');
+  }
+}
+
+async function refreshRealCollections(){
+  const btn = document.getElementById('btnRefreshCollections');
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try{
+    await loadRealCollections(true);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Refresh'; }
   }
 }
 

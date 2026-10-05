@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,13 +45,35 @@ from pdf_text import extract_text
 
 UI_DIR = Path(__file__).parent
 
-_cache: dict = {"deals": None, "computed_at": 0.0, "error": None}
+_cache: dict = {"deals": None, "computed_at": 0.0, "error": None, "skipped": []}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
 _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": None}
 _deal_recon_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _aging_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _monthly_cache: dict = {"data": None, "computed_at": 0.0, "error": None}
 _CACHE_TTL_SECONDS = 300  # re-fetch at most every 5 minutes even without ?refresh=1
+
+# ThreadingHTTPServer hands each request its own thread, and these caches
+# are plain module-level dicts shared by every thread. Without a lock, two
+# requests landing while a cache is stale (easy to hit -- a real
+# compute_deals() can run for minutes) each independently see "stale" and
+# each kick off their own full recompute, doubling the LLM/QBO calls for
+# identical work and racing on which result wins the final cache write.
+# One lock per cache (not one global lock) so refreshing deals doesn't
+# block an unrelated aging-summary refresh.
+_cache_lock = threading.Lock()
+_cash_cache_lock = threading.Lock()
+_collections_cache_lock = threading.Lock()
+_deal_recon_cache_lock = threading.Lock()
+_aging_cache_lock = threading.Lock()
+_monthly_cache_lock = threading.Lock()
+
+# Real signed contract PDFs, keyed by HubSpot agreementRef -- unlike the
+# caches above, a contract's bytes never go stale once signed, so there's
+# no TTL here at all: once fetched, serve it from memory for the rest of
+# this process's life. See _serve_deal_pdf() for why.
+_pdf_cache: dict[str, tuple[str, bytes]] = {}
+_pdf_cache_lock = threading.Lock()
 
 # Durable cache instead of the in-memory-only caches above going stale on
 # every restart -- a restart used to always force a full re-extraction of
@@ -233,7 +256,7 @@ def _build_deal(deal, agreement, fields: dict, confidence: dict, page_count: int
     }
 
 
-def compute_deals() -> tuple[list[dict], list[tuple[str, str, str]]]:
+def compute_deals(prior_by_id: dict[str, dict] | None = None) -> tuple[list[dict], list[tuple[str, str, str, str, float]]]:
     from integrations.hubspot import HubSpotClient, NoAgreementFound
     import pdfplumber
     import io
@@ -244,13 +267,36 @@ def compute_deals() -> tuple[list[dict], list[tuple[str, str, str]]]:
 
     client = HubSpotClient(settings.hubspot_token)
     out = []
-    skipped: list[tuple[str, str, str]] = []  # (deal_id, deal_name, error)
+    # (deal_id, deal_name, error, kind, amount) -- kind is machine-readable
+    # so the frontend can tell "no contract exists at all" (a real,
+    # actionable gap worth its own incident) apart from a transient
+    # extraction failure, instead of string-matching the human-readable
+    # error text. amount rides along since it's already on hand and useful
+    # for prioritizing which skipped deal to chase down first.
+    skipped: list[tuple[str, str, str, str, float]] = []
     for deal in client.list_closed_deals(limit=10):
         if not deal.agreement_ref:
+            # Previously just `continue` -- the deal vanished with no
+            # record anywhere that it was ever seen, let alone why it's
+            # missing from Deal Pipeline. Record it instead so a real
+            # "deal_missing_signed_pdf" incident can surface it.
+            skipped.append((deal.deal_id, deal.deal_name, "No signed agreement attached to this deal", "no_agreement", deal.amount))
+            continue
+
+        prior = (prior_by_id or {}).get(deal.deal_id)
+        if prior and prior.get("agreementRef") == deal.agreement_ref:
+            # Same signed contract as last time -- re-running it through
+            # the LLM would just spend shared Groq per-minute token budget
+            # to get back the identical answer. Reuse it so that budget
+            # goes to deals whose attachment actually changed instead of
+            # being split evenly (and often lost to 429s) across every
+            # deal on every refresh.
+            out.append(prior)
             continue
         try:
             agreement = client.get_agreement(deal.agreement_ref)
         except NoAgreementFound:
+            skipped.append((deal.deal_id, deal.deal_name, "No signed agreement attached to this deal", "no_agreement", deal.amount))
             continue
 
         parsed = extract_text(agreement.content)
@@ -265,7 +311,7 @@ def compute_deals() -> tuple[list[dict], list[tuple[str, str, str]]]:
             # this in the error field so it's never silently swallowed,
             # and falls back to this deal's last known-good extraction
             # (deal_id is what lets it find that prior entry).
-            skipped.append((deal.deal_id, deal.deal_name, str(exc)))
+            skipped.append((deal.deal_id, deal.deal_name, str(exc), "extraction_error", deal.amount))
             continue
 
         try:
@@ -293,37 +339,51 @@ def get_deals(force_refresh: bool = False) -> tuple[list[dict], str | None]:
 
     stale = time.time() - _cache["computed_at"] > _CACHE_TTL_SECONDS
     if force_refresh or _cache["deals"] is None or stale:
-        prior_by_id = {d["id"]: d for d in (_cache["deals"] or [])}
-        try:
-            deals, skipped = compute_deals()
-            # A deal whose extraction fails THIS round shouldn't vanish if
-            # we already have a good extraction for it from before -- that
-            # used to cascade into Cash Application/Collections silently
-            # excluding that deal's real invoice too, since those are
-            # scoped to "customers with a currently-real deal". Recover the
-            # last known-good entry for it instead of just dropping it.
-            recovered_ids = set()
-            for deal_id, name, err in skipped:
-                old = prior_by_id.get(deal_id)
-                if old:
-                    deals.append(old)
-                    recovered_ids.add(deal_id)
-            _cache["deals"] = deals
-            # A per-deal failure (e.g. one deal hit a rate limit) doesn't
-            # invalidate the ones that succeeded -- surface it as an
-            # honest, non-fatal note instead of discarding everything.
-            _cache["error"] = (
-                "; ".join(
-                    f"{name}: {err}" + (" (kept last known-good extraction)" if deal_id in recovered_ids else "")
-                    for deal_id, name, err in skipped
-                ) if skipped else None
-            )
-        except Exception as exc:
-            _cache["error"] = str(exc)
-            if _cache["deals"] is None:
-                _cache["deals"] = []
-        _cache["computed_at"] = time.time()
-        _db_save("deals", _cache["deals"], _cache["computed_at"], _cache["error"])
+        with _cache_lock:
+            # Re-check now that we actually hold the lock -- another
+            # thread may have already refreshed the cache while we were
+            # waiting for it, in which case there's nothing left to do.
+            still_stale = time.time() - _cache["computed_at"] > _CACHE_TTL_SECONDS
+            if force_refresh or _cache["deals"] is None or still_stale:
+                prior_by_id = {d["id"]: d for d in (_cache["deals"] or [])}
+                try:
+                    deals, skipped = compute_deals(prior_by_id)
+                    # A deal whose extraction fails THIS round shouldn't vanish if
+                    # we already have a good extraction for it from before -- that
+                    # used to cascade into Cash Application/Collections silently
+                    # excluding that deal's real invoice too, since those are
+                    # scoped to "customers with a currently-real deal". Recover the
+                    # last known-good entry for it instead of just dropping it.
+                    recovered_ids = set()
+                    for deal_id, name, err, kind, amount in skipped:
+                        old = prior_by_id.get(deal_id)
+                        if old:
+                            deals.append(old)
+                            recovered_ids.add(deal_id)
+                    _cache["deals"] = deals
+                    # A per-deal failure (e.g. one deal hit a rate limit) doesn't
+                    # invalidate the ones that succeeded -- surface it as an
+                    # honest, non-fatal note instead of discarding everything.
+                    _cache["error"] = (
+                        "; ".join(
+                            f"{name}: {err}" + (" (kept last known-good extraction)" if deal_id in recovered_ids else "")
+                            for deal_id, name, err, kind, amount in skipped
+                        ) if skipped else None
+                    )
+                    # Structured, not just the joined error string above --
+                    # lets the frontend tell "no contract exists at all"
+                    # (worth its own real incident) apart from a transient
+                    # extraction failure, without parsing error text.
+                    _cache["skipped"] = [
+                        {"dealId": deal_id, "name": name, "error": err, "kind": kind, "amount": amount}
+                        for deal_id, name, err, kind, amount in skipped
+                    ]
+                except Exception as exc:
+                    _cache["error"] = str(exc)
+                    if _cache["deals"] is None:
+                        _cache["deals"] = []
+                _cache["computed_at"] = time.time()
+                _db_save("deals", _cache["deals"], _cache["computed_at"], _cache["error"])
     return _cache["deals"], _cache["error"]
 
 
@@ -413,15 +473,18 @@ def get_cash(force_refresh: bool = False) -> tuple[dict | None, str | None]:
 
     stale = time.time() - _cash_cache["computed_at"] > _CACHE_TTL_SECONDS
     if force_refresh or _cash_cache["cash"] is None or stale:
-        try:
-            _cash_cache["cash"] = compute_cash()
-            _cash_cache["error"] = None
-        except Exception as exc:
-            _cash_cache["error"] = str(exc)
-            if _cash_cache["cash"] is None:
-                _cash_cache["cash"] = {"matched": [], "unmatched": [], "partial": []}
-        _cash_cache["computed_at"] = time.time()
-        _db_save("cash", _cash_cache["cash"], _cash_cache["computed_at"], _cash_cache["error"])
+        with _cash_cache_lock:
+            still_stale = time.time() - _cash_cache["computed_at"] > _CACHE_TTL_SECONDS
+            if force_refresh or _cash_cache["cash"] is None or still_stale:
+                try:
+                    _cash_cache["cash"] = compute_cash()
+                    _cash_cache["error"] = None
+                except Exception as exc:
+                    _cash_cache["error"] = str(exc)
+                    if _cash_cache["cash"] is None:
+                        _cash_cache["cash"] = {"matched": [], "unmatched": [], "partial": []}
+                _cash_cache["computed_at"] = time.time()
+                _db_save("cash", _cash_cache["cash"], _cash_cache["computed_at"], _cash_cache["error"])
     return _cash_cache["cash"], _cash_cache["error"]
 
 
@@ -511,15 +574,18 @@ def get_deal_reconciliation(force_refresh: bool = False) -> tuple[list[dict], st
 
     stale = time.time() - _deal_recon_cache["computed_at"] > _CACHE_TTL_SECONDS
     if force_refresh or _deal_recon_cache["data"] is None or stale:
-        try:
-            _deal_recon_cache["data"] = compute_deal_reconciliation()
-            _deal_recon_cache["error"] = None
-        except Exception as exc:
-            _deal_recon_cache["error"] = str(exc)
-            if _deal_recon_cache["data"] is None:
-                _deal_recon_cache["data"] = []
-        _deal_recon_cache["computed_at"] = time.time()
-        _db_save("deal_reconciliation", _deal_recon_cache["data"], _deal_recon_cache["computed_at"], _deal_recon_cache["error"])
+        with _deal_recon_cache_lock:
+            still_stale = time.time() - _deal_recon_cache["computed_at"] > _CACHE_TTL_SECONDS
+            if force_refresh or _deal_recon_cache["data"] is None or still_stale:
+                try:
+                    _deal_recon_cache["data"] = compute_deal_reconciliation()
+                    _deal_recon_cache["error"] = None
+                except Exception as exc:
+                    _deal_recon_cache["error"] = str(exc)
+                    if _deal_recon_cache["data"] is None:
+                        _deal_recon_cache["data"] = []
+                _deal_recon_cache["computed_at"] = time.time()
+                _db_save("deal_reconciliation", _deal_recon_cache["data"], _deal_recon_cache["computed_at"], _deal_recon_cache["error"])
     return _deal_recon_cache["data"], _deal_recon_cache["error"]
 
 
@@ -624,15 +690,18 @@ def get_aging_summary(force_refresh: bool = False) -> tuple[dict | None, str | N
 
     stale = time.time() - _aging_cache["computed_at"] > _CACHE_TTL_SECONDS
     if force_refresh or _aging_cache["data"] is None or stale:
-        try:
-            _aging_cache["data"] = compute_aging_summary()
-            _aging_cache["error"] = None
-        except Exception as exc:
-            _aging_cache["error"] = str(exc)
-            if _aging_cache["data"] is None:
-                _aging_cache["data"] = {"buckets": [], "grandTotal": 0}
-        _aging_cache["computed_at"] = time.time()
-        _db_save("aging", _aging_cache["data"], _aging_cache["computed_at"], _aging_cache["error"])
+        with _aging_cache_lock:
+            still_stale = time.time() - _aging_cache["computed_at"] > _CACHE_TTL_SECONDS
+            if force_refresh or _aging_cache["data"] is None or still_stale:
+                try:
+                    _aging_cache["data"] = compute_aging_summary()
+                    _aging_cache["error"] = None
+                except Exception as exc:
+                    _aging_cache["error"] = str(exc)
+                    if _aging_cache["data"] is None:
+                        _aging_cache["data"] = {"buckets": [], "grandTotal": 0}
+                _aging_cache["computed_at"] = time.time()
+                _db_save("aging", _aging_cache["data"], _aging_cache["computed_at"], _aging_cache["error"])
     return _aging_cache["data"], _aging_cache["error"]
 
 
@@ -738,15 +807,18 @@ def get_monthly_summary(force_refresh: bool = False) -> tuple[dict | None, str |
 
     stale = time.time() - _monthly_cache["computed_at"] > _CACHE_TTL_SECONDS
     if force_refresh or _monthly_cache["data"] is None or stale:
-        try:
-            _monthly_cache["data"] = compute_monthly_summary()
-            _monthly_cache["error"] = None
-        except Exception as exc:
-            _monthly_cache["error"] = str(exc)
-            if _monthly_cache["data"] is None:
-                _monthly_cache["data"] = {"months": []}
-        _monthly_cache["computed_at"] = time.time()
-        _db_save("monthly", _monthly_cache["data"], _monthly_cache["computed_at"], _monthly_cache["error"])
+        with _monthly_cache_lock:
+            still_stale = time.time() - _monthly_cache["computed_at"] > _CACHE_TTL_SECONDS
+            if force_refresh or _monthly_cache["data"] is None or still_stale:
+                try:
+                    _monthly_cache["data"] = compute_monthly_summary()
+                    _monthly_cache["error"] = None
+                except Exception as exc:
+                    _monthly_cache["error"] = str(exc)
+                    if _monthly_cache["data"] is None:
+                        _monthly_cache["data"] = {"months": []}
+                _monthly_cache["computed_at"] = time.time()
+                _db_save("monthly", _monthly_cache["data"], _monthly_cache["computed_at"], _monthly_cache["error"])
     return _monthly_cache["data"], _monthly_cache["error"]
 
 
@@ -842,30 +914,33 @@ def get_collections(force_refresh: bool = False) -> tuple[list[dict], str | None
 
     stale = time.time() - _collections_cache["computed_at"] > _CACHE_TTL_SECONDS
     if force_refresh or _collections_cache["collections"] is None or stale:
-        try:
-            fresh = compute_collections()
-            # Preserve sent/sentAt/messageId across recomputes -- a refresh
-            # shouldn't forget that something was already sent.
-            prior = {c["id"]: c for c in (_collections_cache["collections"] or [])}
-            for row in fresh:
-                old = prior.get(row["id"])
-                if old and old.get("sent"):
-                    row["sent"] = True
-                    row["sentAt"] = old.get("sentAt")
-                    row["messageId"] = old.get("messageId")
-                    row["sentTo"] = old.get("sentTo")
-            _collections_cache["collections"] = fresh
-            _collections_cache["error"] = None
-        except Exception as exc:
-            _collections_cache["error"] = str(exc)
-            if _collections_cache["collections"] is None:
-                _collections_cache["collections"] = []
-        _collections_cache["computed_at"] = time.time()
-        _db_save("collections", _collections_cache["collections"], _collections_cache["computed_at"], _collections_cache["error"])
+        with _collections_cache_lock:
+            still_stale = time.time() - _collections_cache["computed_at"] > _CACHE_TTL_SECONDS
+            if force_refresh or _collections_cache["collections"] is None or still_stale:
+                try:
+                    fresh = compute_collections()
+                    # Preserve sent/sentAt/messageId across recomputes -- a refresh
+                    # shouldn't forget that something was already sent.
+                    prior = {c["id"]: c for c in (_collections_cache["collections"] or [])}
+                    for row in fresh:
+                        old = prior.get(row["id"])
+                        if old and old.get("sent"):
+                            row["sent"] = True
+                            row["sentAt"] = old.get("sentAt")
+                            row["messageId"] = old.get("messageId")
+                            row["sentTo"] = old.get("sentTo")
+                    _collections_cache["collections"] = fresh
+                    _collections_cache["error"] = None
+                except Exception as exc:
+                    _collections_cache["error"] = str(exc)
+                    if _collections_cache["collections"] is None:
+                        _collections_cache["collections"] = []
+                _collections_cache["computed_at"] = time.time()
+                _db_save("collections", _collections_cache["collections"], _collections_cache["computed_at"], _collections_cache["error"])
     return _collections_cache["collections"], _collections_cache["error"]
 
 
-def compute_due_reminders(collections: list[dict], state: dict) -> list[dict]:
+def compute_due_reminders(collections: list[dict], state: dict, dedup_enabled: bool = True) -> list[dict]:
     """Which real collections rows need an automated reminder sent right
     now: real invoice, at one of the 3 cadence checkpoints (7 days before
     the deadline, the day of the deadline, or 14 days after), and that
@@ -885,7 +960,7 @@ def compute_due_reminders(collections: list[dict], state: dict) -> list[dict]:
         stage = _reminder_stage(row["dpd"])
         if not stage:
             continue
-        if state.get(row["id"], {}).get(stage):
+        if dedup_enabled and state.get(row["id"], {}).get(stage):
             continue  # this stage already sent for this invoice -- never resend it
         if stage == "final":
             subject = f"FINAL NOTICE: Invoice #{row['inv']} — {row['dpd']} days overdue"
@@ -935,7 +1010,7 @@ def run_reminder_cycle() -> dict:
 
     collections, coll_error = get_collections()
     state = _load_reminder_state()
-    due = compute_due_reminders(collections, state)
+    due = compute_due_reminders(collections, state, dedup_enabled=settings.reminder_dedup_enabled)
 
     from integrations.gmail import GmailClient
 
@@ -984,11 +1059,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_deal_pdf(self, deal_id: str) -> None:
-        """Re-fetches the real signed PDF from HubSpot so the UI can show
-        the actual document (real pages, real download) instead of a
-        flattened text preview. Not cached -- this endpoint is only hit
-        when a user actually opens/downloads a contract, not on every
-        page load."""
+        """Serves the real signed PDF from HubSpot so the UI can show the
+        actual document (real pages, real download) instead of a flattened
+        text preview.
+
+        In-memory only, keyed by agreementRef (not deal_id, so a deal
+        re-pointed at a different file naturally fetches fresh content
+        instead of serving a stale cached one). A contract's bytes never
+        change once signed, so there's no staleness concern the way
+        deals/cash/collections have -- just cost: the first view of a
+        given contract pays a real two-hop HubSpot fetch (signed-url, then
+        the actual download), every view after that is instant for the
+        life of this process. Lost on restart, which is fine -- a contract
+        is viewed rarely enough that re-paying the fetch once per restart
+        is not worth persisting binary PDF bytes into rally_state.db.
+        """
         deals, _ = get_deals()
         deal = next((d for d in deals if d["id"] == deal_id), None)
         if not deal or not deal.get("agreementRef"):
@@ -996,28 +1081,40 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        from integrations.hubspot import HubSpotClient
+        agreement_ref = deal["agreementRef"]
+        cached = _pdf_cache.get(agreement_ref)
+        if cached is None:
+            # Same double-checked-locking pattern as the deals/cash/
+            # collections caches -- two tabs opening the same contract at
+            # once shouldn't both pay a real HubSpot round-trip.
+            with _pdf_cache_lock:
+                cached = _pdf_cache.get(agreement_ref)
+                if cached is None:
+                    from integrations.hubspot import HubSpotClient
 
-        settings = load_settings()
-        client = HubSpotClient(settings.hubspot_token)
-        try:
-            agreement = client.get_agreement(deal["agreementRef"])
-        except Exception as exc:
-            self.send_response(502)
-            self.send_header("Content-Type", "text/plain")
-            body = str(exc).encode("utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+                    settings = load_settings()
+                    client = HubSpotClient(settings.hubspot_token)
+                    try:
+                        agreement = client.get_agreement(agreement_ref)
+                    except Exception as exc:
+                        self.send_response(502)
+                        self.send_header("Content-Type", "text/plain")
+                        body = str(exc).encode("utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    cached = (agreement.filename, agreement.content)
+                    _pdf_cache[agreement_ref] = cached
 
+        filename, content = cached
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
-        self.send_header("Content-Disposition", f'inline; filename="{agreement.filename}"')
-        self.send_header("Content-Length", str(len(agreement.content)))
+        self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+        self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         try:
-            self.wfile.write(agreement.content)
+            self.wfile.write(content)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             # Harmless: the browser cancelled the request mid-stream (modal
             # closed, a different deal's PDF opened, tab navigated away).
@@ -1032,7 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/deals":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             deals, error = get_deals(force_refresh=force)
-            self._send_json({"deals": deals, "error": error, "computed_at": _cache["computed_at"]})
+            self._send_json({"deals": deals, "error": error, "computed_at": _cache["computed_at"], "skipped": _cache["skipped"]})
             return
 
         if path == "/api/cash":
