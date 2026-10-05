@@ -1003,7 +1003,10 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
       <div class="section">
         <div class="sh">
           <h3>Collections queue · dunning stages</h3>
-          <div class="right"><button class="csv-btn" id="runReminderCycleBtn" onclick="runReminderCycle()">Run reminder cycle</button></div>
+          <div class="right">
+            <button class="csv-btn" id="btnRefreshCollections" onclick="refreshRealCollections()">Refresh</button>
+            <button class="csv-btn" id="runReminderCycleBtn" onclick="runReminderCycle()">Run reminder cycle</button>
+          </div>
         </div>
         <div class="body">
           <div class="kanban" id="kanban-collections"></div>
@@ -5929,6 +5932,16 @@ async function loadRealCollections(refresh){
     }
   }catch(e){
     toast('warn', 'Could not reach the live collections API — is server.py running? (' + e.message + ')');
+  }
+}
+
+async function refreshRealCollections(){
+  const btn = document.getElementById('btnRefreshCollections');
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try{
+    await loadRealCollections(true);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Refresh'; }
   }
 }
 
