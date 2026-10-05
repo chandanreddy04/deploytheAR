@@ -936,7 +936,10 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         <div class="sh">
           <h3>Daily reconciliation</h3>
           <span class="desc">· Tuesday Sep 16, 2026 · Emma's morning 3-way check</span>
-          <div class="right"><button class="csv-btn" onclick="exportReconReport()">Export reconciliation report</button></div>
+          <div class="right">
+            <button class="csv-btn" id="btnRefreshCash" onclick="refreshRealCash()">Refresh</button>
+            <button class="csv-btn" onclick="exportReconReport()">Export reconciliation report</button>
+          </div>
         </div>
         <div class="recon-tiles" id="reconTiles"></div>
         <div id="reconVarianceHdr" style="padding:0 18px 6px;font-size:12px;color:var(--text-3);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Variance breakdown · 3 unmatched items · $7,200 total</div>
@@ -5882,6 +5885,16 @@ async function loadRealCash(refresh){
     }
   }catch(e){
     toast('warn', 'Could not reach the live cash API — is server.py running? (' + e.message + ')');
+  }
+}
+
+async function refreshRealCash(){
+  const btn = document.getElementById('btnRefreshCash');
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try{
+    await loadRealCash(true);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Refresh'; }
   }
 }
 
