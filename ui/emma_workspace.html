@@ -835,6 +835,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
         <div class="sh">
           <h3>Contracts to review</h3>
           <span class="desc">· click a row to inspect the parsed contract and PDF</span>
+          <div class="right"><button class="csv-btn" id="btnRefreshDeals" onclick="refreshRealDeals()">Refresh</button></div>
         </div>
         <div class="body padless">
           <table class="t" id="tbl-deal-review">
@@ -5853,6 +5854,21 @@ async function loadRealDeals(refresh){
     }
   }catch(e){
     toast('warn', 'Could not reach the live deals API — is server.py running? (' + e.message + ')');
+  }
+}
+
+// Re-extracting a changed contract through the LLM (compute_deals()'s
+// skip-if-unchanged path only re-runs deals whose agreementRef changed)
+// can take noticeably longer than the cash/collections refreshes, so
+// this button staying disabled and saying "Refreshing…" for a while is
+// expected, not stuck.
+async function refreshRealDeals(){
+  const btn = document.getElementById('btnRefreshDeals');
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try{
+    await loadRealDeals(true);
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Refresh'; }
   }
 }
 
