@@ -922,7 +922,7 @@ def get_collections(force_refresh: bool = False) -> tuple[list[dict], str | None
     return _collections_cache["collections"], _collections_cache["error"]
 
 
-def compute_due_reminders(collections: list[dict], state: dict) -> list[dict]:
+def compute_due_reminders(collections: list[dict], state: dict, dedup_enabled: bool = True) -> list[dict]:
     """Which real collections rows need an automated reminder sent right
     now: real invoice, at one of the 3 cadence checkpoints (7 days before
     the deadline, the day of the deadline, or 14 days after), and that
@@ -942,7 +942,7 @@ def compute_due_reminders(collections: list[dict], state: dict) -> list[dict]:
         stage = _reminder_stage(row["dpd"])
         if not stage:
             continue
-        if state.get(row["id"], {}).get(stage):
+        if dedup_enabled and state.get(row["id"], {}).get(stage):
             continue  # this stage already sent for this invoice -- never resend it
         if stage == "final":
             subject = f"FINAL NOTICE: Invoice #{row['inv']} — {row['dpd']} days overdue"
@@ -992,7 +992,7 @@ def run_reminder_cycle() -> dict:
 
     collections, coll_error = get_collections()
     state = _load_reminder_state()
-    due = compute_due_reminders(collections, state)
+    due = compute_due_reminders(collections, state, dedup_enabled=settings.reminder_dedup_enabled)
 
     from integrations.gmail import GmailClient
 

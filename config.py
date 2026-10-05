@@ -79,6 +79,11 @@ class Settings:
     # goes here instead of the real customer address until this is turned off --
     # set to "real" in .env to start sending to each invoice's actual BillEmail.
     outstanding_reminder_override_email: str | None = "capstnprjt@gmail.com"
+    # When False, run_reminder_cycle() resends every currently-due stage
+    # every time it's called, ignoring reminder_state -- for testing only.
+    # Must be True (the default) before going to production, or the same
+    # customer can get duplicate reminder emails.
+    reminder_dedup_enabled: bool = True
 
 
 def load_settings() -> Settings:
@@ -144,6 +149,8 @@ def load_settings() -> Settings:
     override_raw = (_env("OUTSTANDING_REMINDER_OVERRIDE_EMAIL", "capstnprjt@gmail.com") or "").strip()
     outstanding_reminder_override_email = None if override_raw.lower() == "real" else override_raw
 
+    reminder_dedup_enabled = (_env("REMINDER_DEDUP_ENABLED", "true") or "true").strip().lower() != "false"
+
     return Settings(
         hubspot_token=token, hubspot_mode=mode,
         llm_mode=llm_mode, llm_provider=provider,
@@ -155,4 +162,5 @@ def load_settings() -> Settings:
         gmail_mode=gmail_mode, gmail_client_id=gmail_client_id, gmail_client_secret=gmail_client_secret,
         gmail_refresh_token=gmail_refresh_token, gmail_sender_email=gmail_sender_email,
         outstanding_reminder_override_email=outstanding_reminder_override_email,
+        reminder_dedup_enabled=reminder_dedup_enabled,
     )
