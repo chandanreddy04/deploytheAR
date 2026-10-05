@@ -3029,7 +3029,22 @@ function openContractModal(dealId){
     // modal an explicit height here so the iframe actually expands.
     if(modal) modal.style.height = 'calc(100vh - 60px)';
     foot.style.display = 'none';
-    body.innerHTML = `<iframe src="/api/deals/${dealId}/pdf" title="${c.filename}" style="width:100%;height:100%;border:0;background:#fff"></iframe>`;
+    // The first view of a real contract can genuinely take up to a minute
+    // (a live two-hop HubSpot fetch -- see _serve_deal_pdf()'s caching
+    // comment); with no feedback a blank modal for that long looks frozen
+    // rather than working. The overlay sits on top of the iframe and the
+    // iframe's own onload (fires on success or on the server's error
+    // response alike) removes it the moment anything actually arrives --
+    // cached views remove it almost instantly, same code path either way.
+    body.innerHTML = `
+      <div style="position:relative;width:100%;height:100%">
+        <div id="pdfLoadingMsg" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:#fff;color:var(--text-2);font-size:13px;text-align:center;padding:0 24px">
+          <span style="width:10px;height:10px;border-radius:50%;background:var(--purple);animation:pulse 1.2s infinite"></span>
+          <div>Fetching real contract from HubSpot…</div>
+          <div style="font-size:11.5px;color:var(--text-3)">First view of a large contract can take up to a minute — instant after that</div>
+        </div>
+        <iframe src="/api/deals/${dealId}/pdf" title="${c.filename}" style="width:100%;height:100%;border:0;background:#fff" onload="document.getElementById('pdfLoadingMsg')?.remove()"></iframe>
+      </div>`;
     bd.classList.add('open');
     return;
   }
