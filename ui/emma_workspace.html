@@ -2514,26 +2514,6 @@ function cancelDealEdits(id){
 }
 
 /* =====================================================================
-   RENDER: Approvals
-   ===================================================================== */
-function renderApprovals(){
-  const tb = document.querySelector('#tbl-approval tbody');
-  const rows = getApprovals();
-  tb.innerHTML = rows.map(a=>{
-    const tier = amtTier(a.amt);
-    return `<tr onclick="openApprovalDrawer('${a.inv}')">
-      <td class="mono">${a.inv}</td>
-      <td>${a.c}</td>
-      <td class="amt-cell ${tier}">${money(a.amt)}</td>
-      <td class="mono">${a.deal}</td>
-      <td>${a.approver}</td>
-      <td class="num">${a.age}</td>
-      <td style="color:var(--text-3)">${a.esc}</td>
-    </tr>`;
-  }).join('') || `<tr><td colspan="7" class="empty">No approvals pending for this client</td></tr>`;
-}
-
-/* =====================================================================
    RENDER: Cash Application
    ===================================================================== */
 function renderCash(view){
