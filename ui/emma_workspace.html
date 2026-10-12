@@ -2179,105 +2179,12 @@ document.addEventListener('keydown', function(e){
   setDealReviewFilter(tile.dataset.drfilter);
 });
 
-function _dueDateFromTerms(terms){
-  const m = /Net\s*(\d+)/i.exec(terms||'');
-  const days = m ? parseInt(m[1],10) : 30;
-  const dt = new Date();
-  dt.setDate(dt.getDate() + days);
-  return dt.toISOString().slice(0,10);
-}
-
 function _addMonths(dateStr, months){
   const d = new Date(dateStr + 'T00:00:00');
   d.setMonth(d.getMonth() + months);
   return d.toISOString().slice(0,10);
 }
 
-// monthly/quarterly/annual -> the interval in months; one_time/unset -> null
-function _scheduleIntervalMonths(schedule){
-  if(schedule === 'monthly') return 1;
-  if(schedule === 'quarterly') return 3;
-  if(schedule === 'annual') return 12;
-  return null;
-}
-
-// Creates (or, on re-approve, updates in place) real Invoice Pipeline
-// entries from an extracted deal's autofilled fields -- this is what makes
-// "Approve deal" actually issue something, instead of just flipping a
-// status flag with no invoice record behind it.
-//
-// A one-time (or unstated) invoicing schedule creates a single invoice,
-// same as before. A real, extracted-or-user-set recurring schedule
-// creates a full series spaced by that interval. The itemized per-period
-// schedule isn't something we extract, so each invoice in the series
-// gets an even split of the contract total -- an honest default, not an
-// invented breakdown. Returns the array of invoices created/updated
-// (length 1 for one-time).
-function createOrUpdateInvoiceFromDeal(d){
-  const items = _dealLineItems(d);
-  const pool = INVOICE_PIPELINE.rally;
-  const ctag = d.id + ' · ' + (d.contract ? d.contract.filename : d.c);
-  const baseDueDate = _dueDateFromTerms(d.terms);
-  const intervalMonths = _scheduleIntervalMonths(d.invoicingSchedule);
-
-  let periodCount = 1;
-  if(intervalMonths && d.termMonths){
-    periodCount = Math.max(1, Math.round(d.termMonths / intervalMonths));
-  } else if(intervalMonths){
-    // A recurring cadence is stated but the contract term length isn't --
-    // still demonstrate real recurring behavior rather than silently
-    // collapsing to one invoice, using a conservative default count.
-    periodCount = intervalMonths === 1 ? 12 : intervalMonths === 3 ? 4 : 1;
-  }
-  const perInvoiceAmount = Math.round((d.amt / periodCount) * 100) / 100;
-
-  const created = [];
-  for(let i = 0; i < periodCount; i++){
-    const invId = periodCount > 1
-      ? 'INV-' + String(d.id).replace(/[^A-Za-z0-9]/g,'') + '-' + (i + 1)
-      : 'INV-' + String(d.id).replace(/[^A-Za-z0-9]/g,'');
-    const dueDate = intervalMonths ? _addMonths(baseDueDate, intervalMonths * i) : baseDueDate;
-    const milestone = periodCount > 1
-      ? 'Recurring ' + d.invoicingSchedule + ' invoice ' + (i + 1) + ' of ' + periodCount
-      : (items.length ? items.length + ' line item' + (items.length===1?'':'s') + ' · from contract' : 'Contract total · line items not extracted');
-
-    let inv = pool.find(x=>x.id===invId);
-    if(inv){
-      inv.amount = perInvoiceAmount;
-      inv.dueDate = dueDate;
-      inv.milestone = milestone;
-      inv.ctag = ctag;
-      inv.customer = d.c;
-      inv.lineItems = periodCount === 1 ? items : [];
-      inv.billingEmail = d.billingEmail || null;
-      inv.seriesIndex = i + 1;
-      inv.seriesCount = periodCount;
-      inv.approvedAt = (typeof nowStamp === 'function' ? nowStamp(0) : new Date().toISOString());
-    } else {
-      inv = {
-        id: invId,
-        client: 'Rally UXR',
-        customer: d.c,
-        ctag: ctag,
-        milestone: milestone,
-        amount: perInvoiceAmount,
-        dueDate: dueDate,
-        stage: 'draft',
-        prio: d.prio || 'med',
-        linkedDealId: d.id,
-        real: true,
-        approvedAt: (typeof nowStamp === 'function' ? nowStamp(0) : new Date().toISOString()),
-        lineItems: periodCount === 1 ? items : [],
-        billingEmail: d.billingEmail || null,
-        seriesIndex: i + 1,
-        seriesCount: periodCount,
-      };
-      pool.unshift(inv);
-    }
-    created.push(inv);
-  }
-  return created;
-}
 
 // Actually emails a real invoice PDF to the customer via /api/invoices/send
 // -- builds the real PDF server-side from real deal/line-item data and
@@ -2336,6 +2243,13 @@ async function sendRealInvoiceEmail(invId){
     inv.sentAt = new Date().toISOString();
     inv.messageId = payload.messageId;
     inv.sentTo = payload.to;
+    // Persist the stage change server-side -- the email itself already
+    // sent successfully, so a failure here is quiet bookkeeping, not
+    // something to interrupt the send confirmation over.
+    fetch('/api/invoices/' + encodeURIComponent(inv.id) + '/mark-sent', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sentAt: inv.sentAt, messageId: inv.messageId, sentTo: inv.sentTo})
+    }).catch(()=>{});
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
         ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
@@ -2357,38 +2271,51 @@ async function sendRealInvoiceEmail(invId){
   }
 }
 
-function approveDeal(id){
+async function approveDeal(id){
   const d = findDeal(id); if(!d) return;
   const dealReviewBefore = d.review;
-  d.review = 'approved';
   if(d.real){
-    const invs = createOrUpdateInvoiceFromDeal(d);
-    const first = invs[0];
-    if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
-      AUDIT.unshift({
-        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
-        ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
-        target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
-          ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
-          : 'invoice autofilled from extracted contract terms'),
-        before: {dealId: d.id, review: dealReviewBefore},
-        after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
-      });
+    try{
+      const res = await fetch('/api/deals/' + encodeURIComponent(id) + '/approve', {method: 'POST'});
+      const payload = await res.json();
+      if(!payload.ok){ toast('warn', 'Approve failed: ' + (payload.error || 'unknown error')); return; }
+      d.review = 'approved';
+      const pool = INVOICE_PIPELINE.rally;
+      for(const inv of payload.invoices){
+        const idx = pool.findIndex(x=>x.id===inv.id);
+        if(idx >= 0) pool[idx] = inv; else pool.unshift(inv);
+      }
+      const invs = payload.invoices;
+      const first = invs[0];
+      if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+        AUDIT.unshift({
+          ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
+          ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
+          target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
+            ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
+            : 'invoice autofilled from extracted contract terms'),
+          before: {dealId: d.id, review: dealReviewBefore},
+          after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
+        });
+      }
+      if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
+      renderPipeline();
+      renderInvoicePipeline();
+      if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+      if(typeof renderSchedule === 'function') renderSchedule();
+      if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
+      if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
+      if(typeof applyRealIncidents === 'function') applyRealIncidents();
+      const msg = invs.length > 1
+        ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
+        : `Approved · ${first.id} created from contract, staged in Draft`;
+      toast('success', msg);
+    }catch(e){
+      toast('warn', 'Could not reach the server — is server.py running? (' + e.message + ')');
     }
-    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
-    renderPipeline();
-    renderInvoicePipeline();
-    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
-    if(typeof renderSchedule === 'function') renderSchedule();
-    if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
-    if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
-    if(typeof applyRealIncidents === 'function') applyRealIncidents();
-    const msg = invs.length > 1
-      ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
-      : `Approved · ${first.id} created from contract, staged in Draft`;
-    toast('success', msg);
     return;
   }
+  d.review = 'approved';
   const sched = (typeof HALCYON_SCHEDULE !== 'undefined' && HALCYON_SCHEDULE[d.id]) || [];
   const n = d.progressive ? (sched.length || 5) : 1;
   renderPipeline();
@@ -2688,7 +2615,7 @@ function getInvoicePipeline(){
   if(currentClient==='all')     return INVOICE_PIPELINE.rally.filter(i=>i.real).concat(INVOICE_PIPELINE.trade, INVOICE_PIPELINE.halcyon);
   // Real invoices only, same as Deal Pipeline/Cash Application/Collections
   // -- INVOICE_PIPELINE.rally still carries its original demo cards
-  // underneath the real ones createOrUpdateInvoiceFromDeal() unshifts in,
+  // underneath the real ones loadRealInvoices()/approveDeal() unshift in,
   // but the Invoice Pipeline board should only ever reflect invoices
   // drafted from a real approved HubSpot deal, not this page's own
   // pre-existing demo cards.
@@ -2787,9 +2714,9 @@ function openInvoicePipelineDrawer(id){
     : (inv.real
         // A recurring multi-period invoice (seriesCount > 1) genuinely did
         // have real line items extracted from the contract -- they just
-        // aren't apportioned per period (createOrUpdateInvoiceFromDeal()
-        // splits the total evenly instead of guessing which line item
-        // belongs to which installment). "Not extracted" would be a lie
+        // aren't apportioned per period (_build_invoices_for_deal() in
+        // server.py splits the total evenly instead of guessing which line
+        // item belongs to which installment). "Not extracted" would be a lie
         // here; reuse the already-correct milestone text instead (e.g.
         // "Recurring monthly invoice 18 of 18"), which is only genuinely
         // true for a real single-shot invoice where no pricing table
@@ -5177,6 +5104,13 @@ function applyRealCashToInvoices(){
     const before = {stage: target.stage};
     target.stage = 'paid';
     target.paidVia = 'QBO payment ' + (p.qb || '—') + (p.when ? ' · ' + p.when : '');
+    // Persist so this survives a reload and is visible to a second
+    // browser/user -- target.id only exists server-side once it was
+    // created by a real approval, so this is a no-op for anything else.
+    fetch('/api/invoices/' + encodeURIComponent(target.id) + '/mark-paid', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paidVia: target.paidVia})
+    }).catch(()=>{});
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
         ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
@@ -5430,7 +5364,7 @@ let schStatus = 'all';
 let schSortDir = 1; // 1 ASC, -1 DESC by dueDate
 
 // Real invoices are only ever created once a human approves the deal in
-// Deal Pipeline (createOrUpdateInvoiceFromDeal) -- there is no real "not
+// Deal Pipeline (POST /api/deals/<id>/approve) -- there is no real "not
 // yet drafted" state to schedule ahead of time, so this maps each real,
 // unpaid invoice (possibly a future installment of a recurring series)
 // straight onto the row shape this page already renders.
@@ -5951,6 +5885,33 @@ async function loadRealCollections(refresh){
   }
 }
 
+// Real invoices are now durable server-side (POST /api/deals/<id>/approve
+// creates them, /api/invoices/<id>/mark-sent and mark-paid update them) --
+// this hydrates INVOICE_PIPELINE.rally with that persisted state on page
+// load, which is what makes an approval/invoice survive a reload and show
+// up for a second browser/user instead of only existing in the approving
+// tab's memory.
+async function loadRealInvoices(){
+  try{
+    const res = await fetch('/api/invoices');
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    const list = payload.invoices || [];
+    const pool = INVOICE_PIPELINE.rally;
+    for(const inv of list){
+      const idx = pool.findIndex(x=>x.id===inv.id);
+      if(idx >= 0) pool[idx] = inv; else pool.unshift(inv);
+    }
+    renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
+    if(typeof applyRealIncidents === 'function') applyRealIncidents();
+  }catch(e){
+    toast('warn', 'Could not reach the live invoices API — is server.py running? (' + e.message + ')');
+  }
+}
+
 async function refreshRealCollections(){
   const btn = document.getElementById('btnRefreshCollections');
   if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
@@ -6130,6 +6091,7 @@ updateTopDateStamp();
 setInterval(updateTopDateStamp, 1000);
 
 loadRealDeals(false);
+loadRealInvoices();
 loadRealCash(false);
 loadRealCollections(false);
 loadRealDealReconciliation(false);

@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import calendar
 import hmac
 import json
 import re
@@ -29,7 +30,7 @@ import secrets
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1053,6 +1054,98 @@ def run_reminder_cycle() -> dict:
     }
 
 
+# ===========================================================================
+# REAL INVOICE PERSISTENCE -- previously this entire layer only existed in
+# the browser's own JS state (createOrUpdateInvoiceFromDeal() in
+# emma_workspace.html), so an approval and the invoice it created vanished
+# on reload and were never visible to a second browser/user. Durable via
+# the same db.py cache_store every other real data type already uses, just
+# under keys ("deal_reviews", "real_invoices") that are never recomputed
+# from an external API -- they only change in response to a real human
+# action (approve, send, a matched payment), so there's no TTL/staleness
+# concept here the way deals/cash/collections have.
+# ===========================================================================
+_invoices_lock = threading.Lock()
+
+
+def _load_deal_reviews() -> dict:
+    data, _, _ = _db_load("deal_reviews")
+    return data or {}
+
+
+def _save_deal_reviews(reviews: dict) -> None:
+    _db_save("deal_reviews", reviews, time.time(), None)
+
+
+def _load_real_invoices() -> dict:
+    data, _, _ = _db_load("real_invoices")
+    return data or {}
+
+
+def _save_real_invoices(invoices: dict) -> None:
+    _db_save("real_invoices", invoices, time.time(), None)
+
+
+def _due_date_from_terms(terms: str | None) -> str:
+    m = re.search(r"Net\s*(\d+)", terms or "", re.IGNORECASE)
+    days = int(m.group(1)) if m else 30
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def _add_months(iso_date: str, months: int) -> str:
+    d = date.fromisoformat(iso_date)
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])  # clamp e.g. Jan 31 + 1mo -> Feb 28
+    return date(year, month, day).isoformat()
+
+
+def _schedule_interval_months(schedule: str | None) -> int | None:
+    return {"monthly": 1, "quarterly": 3, "annual": 12}.get(schedule or "")
+
+
+def _build_invoices_for_deal(deal: dict) -> list[dict]:
+    """Python port of emma_workspace.html's createOrUpdateInvoiceFromDeal() --
+    same even-split-across-periods logic, now run once server-side on
+    approval instead of purely in the approving browser's memory."""
+    items = deal.get("lineItems") or []
+    contract = deal.get("contract") or {}
+    ctag = f"{deal['id']} · {contract.get('filename') or deal.get('c')}"
+    base_due = _due_date_from_terms(deal.get("terms"))
+    interval = _schedule_interval_months(deal.get("invoicingSchedule"))
+
+    period_count = 1
+    if interval and deal.get("termMonths"):
+        period_count = max(1, round(deal["termMonths"] / interval))
+    elif interval:
+        period_count = 12 if interval == 1 else 4 if interval == 3 else 1
+
+    per_invoice_amount = round((deal.get("amt") or 0) / period_count, 2)
+    clean_id = re.sub(r"[^A-Za-z0-9]", "", str(deal["id"]))
+
+    invoices = []
+    for i in range(period_count):
+        inv_id = f"INV-{clean_id}-{i + 1}" if period_count > 1 else f"INV-{clean_id}"
+        due_date = _add_months(base_due, interval * i) if interval else base_due
+        if period_count > 1:
+            milestone = f"Recurring {deal.get('invoicingSchedule')} invoice {i + 1} of {period_count}"
+        elif items:
+            milestone = f"{len(items)} line item{'s' if len(items) != 1 else ''} · from contract"
+        else:
+            milestone = "Contract total · line items not extracted"
+        invoices.append({
+            "id": inv_id, "client": "Rally UXR", "customer": deal.get("c"), "ctag": ctag,
+            "milestone": milestone, "amount": per_invoice_amount, "dueDate": due_date,
+            "stage": "draft", "prio": deal.get("prio") or "med", "linkedDealId": deal["id"],
+            "real": True, "approvedAt": datetime.now().isoformat(),
+            "lineItems": items if period_count == 1 else [],
+            "billingEmail": deal.get("billingEmail"),
+            "seriesIndex": i + 1, "seriesCount": period_count,
+        })
+    return invoices
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "EmmaUI/0.1"
 
@@ -1215,7 +1308,18 @@ font-weight:600;cursor:pointer;font-size:14px}}
         if path == "/api/deals":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             deals, error = get_deals(force_refresh=force)
-            self._send_json({"deals": deals, "error": error, "computed_at": _cache["computed_at"], "skipped": _cache["skipped"]})
+            # Merge in the real, durable review status -- without this, a
+            # deal approved in one browser session looks "awaiting review"
+            # again to anyone else (or the same person after a reload),
+            # since compute_deals() itself has no concept of approval.
+            reviews = _load_deal_reviews()
+            merged = [{**d, "review": reviews[d["id"]]["status"]} if d["id"] in reviews else d for d in deals]
+            self._send_json({"deals": merged, "error": error, "computed_at": _cache["computed_at"], "skipped": _cache["skipped"]})
+            return
+
+        if path == "/api/invoices":
+            invoices = _load_real_invoices()
+            self._send_json({"invoices": list(invoices.values())})
             return
 
         if path == "/api/cash":
@@ -1326,13 +1430,13 @@ font-weight:600;cursor:pointer;font-size:14px}}
         """Actually emails a real invoice PDF to the customer. Only ever
         reached by a real POST from the UI's own Send button.
 
-        Invoices only ever exist in the browser's own JS state (built
-        client-side from an approved deal, never persisted server-side the
-        way deals/cash/collections are) -- so unlike those, this endpoint
-        can't look anything up by id. The client sends the full invoice
-        data it already has, and this only lays it out into a real PDF and
-        sends it; it never invents a customer, address, or amount that
-        wasn't already in that payload."""
+        Takes the full invoice data in the payload rather than looking it
+        up by id -- the client already has it on hand (e.g. from editing
+        the To/Subject/Body fields in the send drawer), and this only lays
+        it out into a real PDF and sends it; it never invents a customer,
+        address, or amount that wasn't already in that payload. The caller
+        is responsible for calling /api/invoices/<id>/mark-sent afterwards
+        to persist the stage change -- this endpoint only sends the email."""
         to = (payload.get("to") or "").strip()
         if not to:
             self._send_json({"ok": False, "error": "No recipient email address — cannot send"})
@@ -1400,6 +1504,59 @@ font-weight:600;cursor:pointer;font-size:14px}}
 
         self._send_json({"ok": True, "messageId": message_id, "to": to})
 
+    def _approve_deal(self, deal_id: str) -> None:
+        """Approving a deal now creates real, durable invoice records
+        instead of only ever existing in the approving browser's memory --
+        this is what makes the approval and its invoice(s) survive a
+        reload and show up for a second browser/user. Idempotent: re-
+        approving a deal that already has invoices recreates them with the
+        deal's current extracted fields (e.g. after a re-extraction) rather
+        than duplicating a second set, same "create or update" semantics
+        the old client-side version had."""
+        deals, _ = get_deals()
+        deal = next((d for d in deals if d.get("id") == deal_id), None)
+        if not deal:
+            self._send_json({"ok": False, "error": "Deal not found"})
+            return
+        if not deal.get("real"):
+            self._send_json({"ok": False, "error": "Not a real deal -- nothing to persist server-side"})
+            return
+
+        with _invoices_lock:
+            new_invoices = _build_invoices_for_deal(deal)
+            all_invoices = _load_real_invoices()
+            for inv in new_invoices:
+                all_invoices[inv["id"]] = inv
+            _save_real_invoices(all_invoices)
+
+            reviews = _load_deal_reviews()
+            reviews[deal_id] = {"status": "approved", "approvedAt": datetime.now().isoformat()}
+            _save_deal_reviews(reviews)
+
+        self._send_json({"ok": True, "invoices": new_invoices})
+
+    def _mark_invoice(self, inv_id: str, stage: str, payload: dict) -> None:
+        """Persists a real invoice's stage change -- called after a real
+        Gmail send succeeds (stage='sent') or applyRealCashToInvoices()
+        matches a real QuickBooks payment to it (stage='paid'). Without
+        this, an invoice could be correctly marked Paid in one browser and
+        still show as Sent to everyone else."""
+        with _invoices_lock:
+            invoices = _load_real_invoices()
+            inv = invoices.get(inv_id)
+            if not inv:
+                self._send_json({"ok": False, "error": "Invoice not found"})
+                return
+            inv["stage"] = stage
+            if stage == "sent":
+                inv["sentAt"] = payload.get("sentAt") or datetime.now().isoformat()
+                inv["messageId"] = payload.get("messageId")
+                inv["sentTo"] = payload.get("sentTo")
+            elif stage == "paid":
+                inv["paidVia"] = payload.get("paidVia")
+            _save_real_invoices(invoices)
+        self._send_json({"ok": True})
+
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
@@ -1427,6 +1584,21 @@ font-weight:600;cursor:pointer;font-size:14px}}
 
         if path == "/api/invoices/send":
             self._send_invoice_email(self._read_json_body())
+            return
+
+        if path.startswith("/api/deals/") and path.endswith("/approve"):
+            deal_id = path[len("/api/deals/"):-len("/approve")]
+            self._approve_deal(deal_id)
+            return
+
+        if path.startswith("/api/invoices/") and path.endswith("/mark-sent"):
+            inv_id = path[len("/api/invoices/"):-len("/mark-sent")]
+            self._mark_invoice(inv_id, "sent", self._read_json_body())
+            return
+
+        if path.startswith("/api/invoices/") and path.endswith("/mark-paid"):
+            inv_id = path[len("/api/invoices/"):-len("/mark-paid")]
+            self._mark_invoice(inv_id, "paid", self._read_json_body())
             return
 
         if path == "/api/collections/reminders/run":
