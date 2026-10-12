@@ -22,8 +22,10 @@ Usage:
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
+import secrets
 import sys
 import threading
 import time
@@ -44,6 +46,13 @@ from db import db_load as _db_load, db_save as _db_save
 from pdf_text import extract_text
 
 UI_DIR = Path(__file__).parent
+
+# Simple shared-password gate (see Settings.app_password). Valid session
+# tokens live only in memory -- a restart logs everyone out, which is an
+# acceptable trade-off for a single shared password protecting a single-
+# replica deployment, not a reason to add a persistence layer for it.
+_valid_sessions: set[str] = set()
+_SESSION_COOKIE = "emma_session"
 
 _cache: dict = {"deals": None, "computed_at": 0.0, "error": None, "skipped": []}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
@@ -1050,13 +1059,79 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args) -> None:
         sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
 
-    def _send_json(self, payload) -> None:
+    def _send_json(self, payload, status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _get_cookie(self, name: str) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            part = part.strip()
+            if part.startswith(name + "="):
+                return part[len(name) + 1:]
+        return None
+
+    def _is_authed(self) -> bool:
+        settings = load_settings()
+        if not settings.app_password:
+            return True  # gate not configured for this environment
+        token = self._get_cookie(_SESSION_COOKIE)
+        return bool(token) and token in _valid_sessions
+
+    def _serve_login_page(self, error: str | None = None) -> None:
+        msg = f'<p class="err">{error}</p>' if error else ""
+        html = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Emma</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;background:#f5f5f6;display:flex;
+align-items:center;justify-content:center;height:100vh;margin:0}}
+.box{{background:#fff;padding:32px 36px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.08);width:280px}}
+h1{{font-size:18px;margin:0 0 18px;color:#111}}
+input{{width:100%;padding:9px 10px;border:1px solid #d9d9dd;border-radius:6px;font-size:14px;
+box-sizing:border-box;margin-bottom:12px}}
+button{{width:100%;padding:10px;border:none;border-radius:6px;background:#7c5cfc;color:#fff;
+font-weight:600;cursor:pointer;font-size:14px}}
+.err{{color:#c00;font-size:13px;margin:0 0 12px}}
+</style></head><body><div class="box"><h1>Sign in</h1>{msg}
+<form method="POST" action="/login">
+<input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">
+<button type="submit">Sign in</button>
+</form></div></body></html>"""
+        body = html.encode("utf-8")
+        self.send_response(401 if error else 200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_login(self) -> None:
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        submitted = parse_qs(raw).get("password", [""])[0]
+        settings = load_settings()
+        if settings.app_password and hmac.compare_digest(submitted, settings.app_password):
+            token = secrets.token_urlsafe(32)
+            _valid_sessions.add(token)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie", f"{_SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax")
+            self.end_headers()
+        else:
+            self._serve_login_page(error="Incorrect password")
+
+    def _handle_logout(self) -> None:
+        token = self._get_cookie(_SESSION_COOKIE)
+        if token:
+            _valid_sessions.discard(token)
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", f"{_SESSION_COOKIE}=; Path=/; Max-Age=0")
+        self.end_headers()
 
     def _serve_deal_pdf(self, deal_id: str) -> None:
         """Serves the real signed PDF from HubSpot so the UI can show the
@@ -1125,6 +1200,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path == "/logout":
+            self._handle_logout()
+            return
+
+        if not self._is_authed():
+            if path.startswith("/api/"):
+                self._send_json({"error": "Not authenticated"}, status=401)
+            else:
+                self._serve_login_page()
+            return
 
         if path == "/api/deals":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
@@ -1325,6 +1411,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path == "/login":
+            self._handle_login()
+            return
+
+        if not self._is_authed():
+            self._send_json({"ok": False, "error": "Not authenticated"}, status=401)
+            return
 
         if path.startswith("/api/collections/") and path.endswith("/send"):
             coll_id = path[len("/api/collections/"):-len("/send")]

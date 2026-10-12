@@ -84,6 +84,11 @@ class Settings:
     # Must be True (the default) before going to production, or the same
     # customer can get duplicate reminder emails.
     reminder_dedup_enabled: bool = True
+    # A single shared password gating every page and API route. None (the
+    # default) means the gate is off -- unset locally, so local dev never
+    # risks an accidental lockout; set APP_PASSWORD in .env (or Railway's
+    # env vars) to turn it on for a given environment.
+    app_password: str | None = None
 
 
 def load_settings() -> Settings:
@@ -163,4 +168,5 @@ def load_settings() -> Settings:
         gmail_refresh_token=gmail_refresh_token, gmail_sender_email=gmail_sender_email,
         outstanding_reminder_override_email=outstanding_reminder_override_email,
         reminder_dedup_enabled=reminder_dedup_enabled,
+        app_password=_env("APP_PASSWORD"),
     )
