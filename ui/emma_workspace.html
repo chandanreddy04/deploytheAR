@@ -1455,6 +1455,15 @@ const CASH_PARTIAL = [
 // Drives both the "Deal payment status" table and the Daily reconciliation
 // tiles/variance breakdown above it, so both sections tell the same story.
 let DEAL_RECON = [];
+// Real day-by-day unmatched-total history, from the same /api/deals/
+// reconciliation call -- each entry has tracked:false for a day before
+// this feature existed, so the chart can show an honest gap instead of
+// a fabricated zero for days nothing was actually recorded.
+let REAL_RECON_TREND = [];
+// Whichever variance rows renderReconTiles() last actually put on screen
+// (real or demo) -- exportReconReport() reads this instead of always
+// exporting the hardcoded demo array regardless of what's visible.
+let CURRENT_RECON_VARIANCE_ROWS = [];
 
 const DUNNING_STAGES = ['Reminder','First notice','Second notice','Final demand','Escalated','Writeoff review'];
 const COLLECTIONS = [
@@ -4363,6 +4372,10 @@ function renderReconTiles(){
     </div>
   `;
   const varianceRows = real ? real.varianceRows : RECON_UNMATCHED;
+  // exportReconReport() reads this so the downloaded CSV always matches
+  // whatever's actually on screen -- real rows when real data loaded,
+  // the same demo rows otherwise, never a stale mismatch between the two.
+  CURRENT_RECON_VARIANCE_ROWS = varianceRows;
   const varianceHdr = document.getElementById('reconVarianceHdr');
   if(varianceHdr){
     const total = varianceRows.reduce((s,r)=>s+(Number(r.amt)||0),0);
@@ -4387,21 +4400,36 @@ function renderReconTiles(){
   }
   const trend = document.getElementById('reconTrend');
   if(trend){
-    trend.innerHTML = RECON_TREND.map(d=>{
-      const color = d.s==='green'?'#0d6b2c':d.s==='amber'?'#c8871a':'#c02a2a';
-      const tip = d.v===0 ? d.d+' · reconciled' : d.d+' · variance '+money(d.v);
-      return `<span class="recon-dot" title="${esc(tip)}" style="background:${color}"></span>`;
-    }).join('') + '<span class="recon-trend-lbl">Last 14 days · hover for variance</span>';
+    if(real && REAL_RECON_TREND.length){
+      // Real day-by-day history, recorded by the backend on each genuine
+      // recompute (see _record_recon_trend_snapshot() in server.py) --
+      // tracked:false for any day before this existed, shown as an
+      // honest gap rather than a fabricated zero.
+      const anyUntracked = REAL_RECON_TREND.some(d=>!d.tracked);
+      trend.innerHTML = REAL_RECON_TREND.map(d=>{
+        if(!d.tracked) return `<span class="recon-dot" title="${esc(d.date)} · not tracked yet" style="background:#d9d9dd"></span>`;
+        const color = d.amount === 0 ? '#0d6b2c' : '#c8871a';
+        const tip = d.amount === 0 ? d.date+' · reconciled' : d.date+' · '+money(d.amount)+' unmatched';
+        return `<span class="recon-dot" title="${esc(tip)}" style="background:${color}"></span>`;
+      }).join('') + '<span class="recon-trend-lbl">Last 14 days' + (anyUntracked ? ' · tracking just started, earlier days not recorded yet' : ' · hover for detail') + '</span>';
+    } else {
+      trend.innerHTML = RECON_TREND.map(d=>{
+        const color = d.s==='green'?'#0d6b2c':d.s==='amber'?'#c8871a':'#c02a2a';
+        const tip = d.v===0 ? d.d+' · reconciled' : d.d+' · variance '+money(d.v);
+        return `<span class="recon-dot" title="${esc(tip)}" style="background:${color}"></span>`;
+      }).join('') + '<span class="recon-trend-lbl">Last 14 days · hover for variance</span>';
+    }
   }
 }
 
 function exportReconReport(){
-  const rows = [['ref','customer','amount','reason','note']].concat(RECON_UNMATCHED.map(r=>[r.ref,r.c,r.amt,r.reason,r.note]));
+  const source = CURRENT_RECON_VARIANCE_ROWS.length ? CURRENT_RECON_VARIANCE_ROWS : RECON_UNMATCHED;
+  const rows = [['ref','customer','amount','reason','note']].concat(source.map(r=>[r.ref,r.c,r.amt,r.reason,r.note]));
   const csv = rows.map(r=>r.map(x=>`"${x}"`).join(',')).join('\n');
   const blob = new Blob([csv],{type:'text/csv'});
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href=url; a.download='emma_reconciliation_2026-09-16.csv'; a.click();
-  toast('success','Reconciliation report exported · '+RECON_UNMATCHED.length+' variance rows');
+  const a = document.createElement('a'); a.href=url; a.download='emma_reconciliation_' + new Date().toISOString().slice(0,10) + '.csv'; a.click();
+  toast('success','Reconciliation report exported · '+source.length+' variance rows');
 }
 
 /* =====================================================================
@@ -5997,6 +6025,7 @@ async function loadRealDealReconciliation(refresh){
     }
     renderDealReconciliation(rows);
     DEAL_RECON = rows;
+    REAL_RECON_TREND = payload.trend || [];
     if(typeof renderReconTiles === 'function') renderReconTiles();
     if(typeof applyRealOverviewCollectionKpis === 'function') applyRealOverviewCollectionKpis();
     if(typeof applyRealMorningBrief === 'function') applyRealMorningBrief();

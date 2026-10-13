@@ -576,6 +576,42 @@ def compute_deal_reconciliation() -> list[dict]:
     return out
 
 
+def _record_recon_trend_snapshot(recon_data: list[dict]) -> None:
+    """Records today's real unmatched total (sum of partial/unpaid QBO
+    balances) into durable day-by-day history. This is the only way this
+    app gets a real trend without a background scheduler (a standing rule
+    here, never add one) -- each genuine recompute of deal reconciliation
+    overwrites *today's own* entry, so the chart reflects actual usage
+    instead of a fabricated history. A date stops being "today" the
+    moment the calendar rolls over, and nothing ever touches a past
+    date's entry again, so it becomes a fixed historical data point from
+    whatever today's last real recompute happened to show."""
+    today_iso = date.today().isoformat()
+    unmatched_total = sum(
+        (d.get("qboBalance") or 0) for d in recon_data
+        if d.get("status") in ("partial", "unpaid")
+    )
+    history, _, _ = _db_load("recon_trend")
+    history = history or {}
+    history[today_iso] = round(unmatched_total, 2)
+    _db_save("recon_trend", history, time.time(), None)
+
+
+def _recon_trend_last_14_days() -> list[dict]:
+    """The last 14 calendar days, each with whatever real snapshot exists
+    for it -- 'tracked': false for any day before this feature started
+    recording, so the frontend can show an honest gap instead of a
+    fabricated zero for days that were never actually observed."""
+    history, _, _ = _db_load("recon_trend")
+    history = history or {}
+    today = date.today()
+    out = []
+    for i in range(13, -1, -1):
+        iso = (today - timedelta(days=i)).isoformat()
+        out.append({"date": iso, "amount": history.get(iso), "tracked": iso in history})
+    return out
+
+
 def get_deal_reconciliation(force_refresh: bool = False) -> tuple[list[dict], str | None]:
     if _deal_recon_cache["data"] is None and not force_refresh:
         data, computed_at, error = _db_load("deal_reconciliation")
@@ -590,6 +626,7 @@ def get_deal_reconciliation(force_refresh: bool = False) -> tuple[list[dict], st
                 try:
                     _deal_recon_cache["data"] = compute_deal_reconciliation()
                     _deal_recon_cache["error"] = None
+                    _record_recon_trend_snapshot(_deal_recon_cache["data"])
                 except Exception as exc:
                     _deal_recon_cache["error"] = str(exc)
                     if _deal_recon_cache["data"] is None:
@@ -1337,7 +1374,10 @@ font-weight:600;cursor:pointer;font-size:14px}}
         if path == "/api/deals/reconciliation":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             recon, error = get_deal_reconciliation(force_refresh=force)
-            self._send_json({"reconciliation": recon, "error": error, "computed_at": _deal_recon_cache["computed_at"]})
+            self._send_json({
+                "reconciliation": recon, "error": error, "computed_at": _deal_recon_cache["computed_at"],
+                "trend": _recon_trend_last_14_days(),
+            })
             return
 
         if path == "/api/invoices/aging":
