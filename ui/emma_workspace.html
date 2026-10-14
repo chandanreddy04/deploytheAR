@@ -1712,7 +1712,13 @@ function getAudit(){
   if(currentClient==='trade')   return TRADE_AUDIT.concat(AUDIT.slice(0,4));
   if(currentClient==='halcyon') return HALCYON_AUDIT.concat(AUDIT.slice(0,2));
   if(currentClient==='all')     return TRADE_AUDIT.concat(HALCYON_AUDIT, AUDIT);
-  return AUDIT;
+  // Real audit entries only -- AUDIT still carries ~30 fabricated demo
+  // rows underneath the real ones approveDeal()/sendRealInvoiceEmail()/
+  // saveDealEdits()/snoozeScheduledInvoice()/submitWriteoff()/
+  // submitCreditNote() unshift in, same real-only scoping as Deal
+  // Pipeline/Collections/Incidents/Invoice Pipeline already use. Same
+  // before/after signal renderAudit()'s "Live" badge already relies on.
+  return AUDIT.filter(a => a.before !== undefined || a.after !== undefined);
 }
 function findDeal(id){
   return DEALS.find(x=>x.id===id) || TRADE_DEALS.find(x=>x.id===id) || HALCYON_DEALS.find(x=>x.id===id);
