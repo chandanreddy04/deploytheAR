@@ -421,6 +421,53 @@ table.t .mono{font-family:var(--mono);font-size:11.5px}
 .shell.ssb-collapsed .ssb .ni .badge{display:none}
 .shell.ssb-collapsed .ssb .foot{display:none}
 
+/* ========== Mobile nav (hamburger-triggered stacked drawer) ==========
+   .shell was a rigid 3-column grid (236px + 260px + 1fr) with zero
+   responsive behavior at all -- on a 375px phone that's 496px of fixed
+   sidebar before content even starts. Below the breakpoint, both
+   sidebars collapse into one scrollable off-canvas drawer (stacked, not
+   side-by-side -- side-by-side still doesn't fit two real navs on a
+   phone width) toggled by a single hamburger button in the header. */
+.mobile-nav-toggle{display:none;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px;border:1px solid var(--border-strong);background:#fff;cursor:pointer;flex-shrink:0;font-size:18px;color:var(--text)}
+/* display:none as a real default (not just inside the media query) --
+   .shell stays display:grid above the breakpoint, and an un-hidden plain
+   <div> here would become an unintended 4th grid item, shifting every
+   column over by one. */
+.mobile-nav-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:190}
+@media (max-width:860px){
+  .shell{display:block}
+  .mobile-nav-toggle{display:flex}
+  .shell.nav-open .mobile-nav-backdrop{display:block}
+  .psb,.ssb{
+    position:relative;z-index:195;width:100%;height:auto;max-height:0;overflow:hidden;
+    border-right:none;border-bottom:1px solid var(--border);
+    transition:max-height .25s ease;
+  }
+  .shell.nav-open .psb,.shell.nav-open .ssb{max-height:60vh;overflow-y:auto}
+  .content{padding:18px 16px 40px}
+  .header{padding:14px 16px 12px;flex-wrap:wrap}
+  .header .title{font-size:19px}
+  /* .h1 is flex:1, which keeps it on the first row with the hamburger
+     button; without forcing .right onto its own row, three flex
+     children fighting for one row squeezed the title down to one word
+     per line instead of actually wrapping normally. */
+  .header .right{flex-basis:100%;order:3;margin-top:2px}
+  /* Tables stay real <table> elements (changing display would break
+     column alignment) -- the section body around them scrolls
+     horizontally instead, so a wide table scrolls in its own box
+     rather than widening the whole page. */
+  .section .body{overflow-x:auto}
+  /* The base .ask-panel rule (width:380px) is declared further down in
+     the stylesheet, after this media query -- same specificity, later
+     source position wins regardless of which media condition matches,
+     hence !important here. */
+  .ask-panel{width:100%!important}
+  /* .kpis is reused across Overview/Deal pipeline/Invoicing schedule/AR
+     aging at 3-5 columns, several set inline (higher specificity than a
+     plain class rule, hence !important) -- none of them ever wrapped. */
+  .kpis{grid-template-columns:repeat(2,1fr)!important;gap:10px!important}
+}
+
 /* ========== Ask Emma chat ========== */
 .ask-fab{position:fixed;right:22px;bottom:22px;width:60px;height:60px;border-radius:50%;background:var(--purple);color:#fff;border:none;cursor:pointer;box-shadow:0 8px 22px rgba(124,92,252,.35);display:flex;align-items:center;justify-content:center;z-index:900;transition:transform .15s}
 .ask-fab:hover{transform:translateY(-2px)}
@@ -547,6 +594,8 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
 
 <div class="shell">
 
+  <div class="mobile-nav-backdrop" onclick="toggleMobileNav(false)"></div>
+
   <!-- ================== PRIMARY SIDEBAR: Lumina Activate ================== -->
   <aside class="psb">
     <div class="brand">
@@ -612,6 +661,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
   <!-- ================== MAIN ================== -->
   <main class="main">
     <div class="header">
+      <button class="mobile-nav-toggle" id="mobileNavToggle" onclick="toggleMobileNav()" aria-label="Open navigation">&#9776;</button>
       <div class="h1">
         <h1 class="title">Emma · Revenue Cycle Coworker · Rally UXR</h1>
         <div class="subtitle" id="pageSubtitle">Emma sits above your invoicing tool (Ramp, bill.com, Chargebee, Stripe) and orchestrates the deal-to-cash workflow across HubSpot, QuickBooks, and your finance inbox.</div>
@@ -2084,7 +2134,19 @@ document.getElementById('tabNav').addEventListener('click', e=>{
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('scr-'+tab).classList.add('active');
   window.scrollTo(0,0);
+  toggleMobileNav(false);
 });
+
+// Mobile hamburger drawer -- stacks both sidebars into one scrollable
+// off-canvas panel below the .mobile-nav-toggle breakpoint (see the
+// "Mobile nav" CSS block). Passing an explicit boolean (from the
+// backdrop tap or a tab selection) always closes; omitting it toggles.
+function toggleMobileNav(open){
+  const shell = document.querySelector('.shell');
+  if(!shell) return;
+  const next = open === undefined ? !shell.classList.contains('nav-open') : open;
+  shell.classList.toggle('nav-open', next);
+}
 
 /* =====================================================================
    RENDER: Deal review queue
