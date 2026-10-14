@@ -55,6 +55,128 @@ UI_DIR = Path(__file__).parent
 _valid_sessions: set[str] = set()
 _SESSION_COOKIE = "emma_session"
 
+# Split-layout sign-in page: a branding panel (reusing the main app's own
+# hero copy, purple palette, and "E" avatar mark) beside the actual form,
+# collapsing to a compact header on narrow screens. Dark mode follows the
+# OS via prefers-color-scheme since the main app itself has no theme
+# toggle to match. __MSG__ is replaced by _serve_login_page(), not an
+# f-string placeholder -- see the comment there for why.
+_LOGIN_PAGE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Emma</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%237c5cfc'/%3E%3Ctext x='16' y='22' font-size='16' font-family='Arial' font-weight='700' fill='white' text-anchor='middle'%3EE%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f5f5f6;--surface:#fff;--surface-2:#fafafb;--border:#e8e8ea;--border-strong:#d9d9dd;
+  --text:#111114;--text-2:#4a4a55;--text-3:#8a8a94;
+  --purple:#7c5cfc;--purple-deep:#5A3ABF;--purple-soft:#f3f0ff;--purple-mid:#ede8ff;
+  --red:#dc2626;--red-bg:#fee2e2;
+  --shadow-lg:0 8px 30px rgba(0,0,0,.08);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#121216;--surface:#1b1b22;--surface-2:#202028;--border:#2b2b34;--border-strong:#34343f;
+    --text:#f1f1f4;--text-2:#b7b7c2;--text-3:#868691;
+    --purple:#9a82ff;--purple-deep:#c3b3ff;--purple-soft:#241f38;--purple-mid:#2c2444;
+    --red:#f87171;--red-bg:#3a1b1e;
+    --shadow-lg:0 8px 30px rgba(0,0,0,.45);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;min-height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+.split{display:flex;min-height:100vh}
+.brand-panel{
+  flex:1 1 50%;display:flex;flex-direction:column;justify-content:center;padding:60px;
+  background:linear-gradient(135deg,var(--purple-soft) 0%,var(--bg) 100%);
+  border-right:1px solid var(--border);
+}
+.brand-mark{
+  width:44px;height:44px;border-radius:50%;flex-shrink:0;
+  background:linear-gradient(135deg,var(--purple),var(--purple-deep));color:#fff;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;
+  margin-bottom:18px;box-shadow:0 4px 14px rgba(124,92,252,.35);
+}
+.brand-panel h1{font-size:28px;margin:0 0 4px}
+.brand-panel .tagline{font-size:13px;color:var(--purple-deep);font-weight:700;margin:0 0 20px;text-transform:uppercase;letter-spacing:.5px}
+.brand-panel .desc{font-size:14.5px;line-height:1.6;color:var(--text-2);max-width:420px;margin:0 0 26px}
+.brand-panel .features{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:10px}
+.brand-panel .features li{font-size:13px;color:var(--text-2);display:flex;align-items:center;gap:9px}
+.brand-panel .features li::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--purple);flex-shrink:0}
+.form-panel{flex:1 1 50%;display:flex;align-items:center;justify-content:center;padding:40px 24px}
+.box{
+  background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  padding:36px 40px;box-shadow:var(--shadow-lg);width:100%;max-width:340px;
+  animation:rise .4s cubic-bezier(.16,1,.3,1);
+}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.box h2{font-size:20px;margin:0 0 22px}
+.err-banner{background:var(--red-bg);color:var(--red);border:1px solid var(--red);border-radius:8px;padding:9px 12px;font-size:12.5px;margin:0 0 16px}
+.pw-wrap{position:relative;margin-bottom:16px}
+.pw-wrap input{
+  width:100%;padding:10px 40px 10px 12px;border:1px solid var(--border-strong);border-radius:8px;
+  font-size:14px;background:var(--surface-2);color:var(--text);font-family:inherit;transition:.15s;
+}
+.pw-wrap input:focus{outline:none;border-color:var(--purple);box-shadow:0 0 0 3px var(--purple-mid);background:var(--surface)}
+.toggle-pw{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px;color:var(--text-3);display:flex}
+.toggle-pw:hover{color:var(--purple)}
+button[type=submit]{
+  width:100%;padding:11px;border:none;border-radius:8px;background:var(--purple);color:#fff;
+  font-weight:600;font-size:14px;cursor:pointer;transition:.15s;
+}
+button[type=submit]:hover{background:var(--purple-deep)}
+button[type=submit]:focus-visible{outline:2px solid var(--purple);outline-offset:2px}
+.footer{margin:22px 0 0;text-align:center;font-size:11.5px;color:var(--text-3)}
+@media (max-width:760px){
+  .split{flex-direction:column}
+  .brand-panel{flex:none;padding:32px 24px 18px;border-right:none;border-bottom:1px solid var(--border);align-items:center;text-align:center}
+  .brand-panel .desc,.brand-panel .features{display:none}
+  .form-panel{padding:32px 20px}
+}
+</style></head><body>
+<div class="split">
+  <div class="brand-panel">
+    <div class="brand-mark">E</div>
+    <h1>Emma</h1>
+    <p class="tagline">Revenue Cycle Coworker</p>
+    <p class="desc">Emma sits above your invoicing tool (Ramp, bill.com, Chargebee, Stripe) and orchestrates the deal-to-cash workflow across HubSpot, QuickBooks, and your finance inbox.</p>
+    <ul class="features">
+      <li>Deal pipeline</li>
+      <li>Cash application</li>
+      <li>Collections queue</li>
+    </ul>
+  </div>
+  <div class="form-panel">
+    <div class="box">
+      <h2>Sign in</h2>
+      __MSG__
+      <form method="POST" action="/login">
+        <div class="pw-wrap">
+          <input type="password" id="pw" name="password" placeholder="Password" autofocus autocomplete="current-password">
+          <button type="button" class="toggle-pw" id="toggleBtn" onclick="togglePw()" aria-label="Show password">
+            <svg id="eyeOpen" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg id="eyeClosed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a18.5 18.5 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="footer">Rally UXR · Emma</p>
+    </div>
+  </div>
+</div>
+<script>
+function togglePw(){
+  var i = document.getElementById('pw');
+  var o = document.getElementById('eyeOpen'), c = document.getElementById('eyeClosed');
+  var show = i.type === 'password';
+  i.type = show ? 'text' : 'password';
+  o.style.display = show ? 'none' : '';
+  c.style.display = show ? '' : 'none';
+  document.getElementById('toggleBtn').setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+}
+</script>
+</body></html>"""
+
 _cache: dict = {"deals": None, "computed_at": 0.0, "error": None, "skipped": []}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
 _collections_cache: dict = {"collections": None, "computed_at": 0.0, "error": None}
@@ -1258,25 +1380,12 @@ class Handler(BaseHTTPRequestHandler):
         return bool(token) and token in _valid_sessions
 
     def _serve_login_page(self, error: str | None = None) -> None:
-        msg = f'<p class="err">{error}</p>' if error else ""
-        html = f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in — Emma</title>
-<style>
-body{{font-family:-apple-system,Segoe UI,sans-serif;background:#f5f5f6;display:flex;
-align-items:center;justify-content:center;height:100vh;margin:0}}
-.box{{background:#fff;padding:32px 36px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.08);width:280px}}
-h1{{font-size:18px;margin:0 0 18px;color:#111}}
-input{{width:100%;padding:9px 10px;border:1px solid #d9d9dd;border-radius:6px;font-size:14px;
-box-sizing:border-box;margin-bottom:12px}}
-button{{width:100%;padding:10px;border:none;border-radius:6px;background:#7c5cfc;color:#fff;
-font-weight:600;cursor:pointer;font-size:14px}}
-.err{{color:#c00;font-size:13px;margin:0 0 12px}}
-</style></head><body><div class="box"><h1>Sign in</h1>{msg}
-<form method="POST" action="/login">
-<input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">
-<button type="submit">Sign in</button>
-</form></div></body></html>"""
+        msg = f'<div class="err-banner">{error}</div>' if error else ""
+        # Plain string (not an f-string) with a literal placeholder token --
+        # the page's own CSS/JS is full of real { } braces, which an
+        # f-string would otherwise force doubling everywhere just to
+        # interpolate one error message.
+        html = _LOGIN_PAGE_HTML.replace("__MSG__", msg)
         body = html.encode("utf-8")
         self.send_response(401 if error else 200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
