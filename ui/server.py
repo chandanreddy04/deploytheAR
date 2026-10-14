@@ -284,7 +284,7 @@ def compute_deals(prior_by_id: dict[str, dict] | None = None) -> tuple[list[dict
     # error text. amount rides along since it's already on hand and useful
     # for prioritizing which skipped deal to chase down first.
     skipped: list[tuple[str, str, str, str, float]] = []
-    for deal in client.list_closed_deals(limit=10):
+    for deal in client.list_closed_deals():
         if not deal.agreement_ref:
             # Previously just `continue` -- the deal vanished with no
             # record anywhere that it was ever seen, let alone why it's
@@ -433,9 +433,16 @@ def compute_cash() -> dict:
 
     client = QboClient(settings)
     all_payments, _ = client.list_payments_since(None)
-    all_invoices = client.list_invoices(limit=50)
+    all_invoices = client.list_invoices()
     payments = [p for p in all_payments if _normalize_customer_name(p.customer_name) in real_customer_keys]
     invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
+
+    # Keyed by DocNumber so a matched payment can be compared against its
+    # own linked invoice's real TotalAmt below -- only ever used when a
+    # payment links to exactly one invoice (see the overpayment check),
+    # since a split payment's own per-invoice allocation isn't captured
+    # anywhere in QboPayment.
+    invoices_by_docnum = {i.get("DocNumber"): i for i in invoices if i.get("DocNumber")}
 
     matched, unmatched = [], []
     for p in payments:
@@ -449,6 +456,13 @@ def compute_cash() -> dict:
         if p.linked_invoice_numbers:
             row["inv"] = ", ".join(p.linked_invoice_numbers)
             row["conf"] = 1.0  # QBO's own LinkedTxn -- a fact, not a fuzzy guess
+            if len(p.linked_invoice_numbers) == 1:
+                linked_inv = invoices_by_docnum.get(p.linked_invoice_numbers[0])
+                if linked_inv:
+                    inv_total = float(linked_inv.get("TotalAmt") or 0)
+                    over = round(p.total_amount - inv_total, 2)
+                    if over > 0.01:
+                        row["over"] = over
             matched.append(row)
         else:
             row["inv"] = "—"
@@ -535,7 +549,7 @@ def compute_deal_reconciliation() -> list[dict]:
 
     deals, _ = get_deals()
     client = QboClient(settings)
-    qbo_invoices = client.list_invoices(limit=50)
+    qbo_invoices = client.list_invoices()
 
     by_customer: dict[str, list[dict]] = {}
     for inv in qbo_invoices:
@@ -664,7 +678,7 @@ def _real_outstanding_invoices() -> list[dict]:
     real_customer_keys.discard("")
 
     client = QboClient(settings)
-    all_invoices = client.list_invoices(limit=50)
+    all_invoices = client.list_invoices()
     invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
     today = date.today()
 
@@ -779,7 +793,7 @@ def compute_monthly_summary() -> dict:
     real_customer_keys.discard("")
 
     client = QboClient(settings)
-    all_invoices = client.list_invoices(limit=50)
+    all_invoices = client.list_invoices()
     invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
     all_payments, _ = client.list_payments_since(None)
     payments = [p for p in all_payments if _normalize_customer_name(p.customer_name) in real_customer_keys]
@@ -1123,6 +1137,24 @@ def _save_real_invoices(invoices: dict) -> None:
     _db_save("real_invoices", invoices, time.time(), None)
 
 
+def _load_writeoffs() -> dict:
+    data, _, _ = _db_load("writeoffs")
+    return data or {}
+
+
+def _save_writeoffs(writeoffs: dict) -> None:
+    _db_save("writeoffs", writeoffs, time.time(), None)
+
+
+def _load_credit_notes() -> dict:
+    data, _, _ = _db_load("credit_notes")
+    return data or {}
+
+
+def _save_credit_notes(notes: dict) -> None:
+    _db_save("credit_notes", notes, time.time(), None)
+
+
 def _due_date_from_terms(terms: str | None) -> str:
     m = re.search(r"Net\s*(\d+)", terms or "", re.IGNORECASE)
     days = int(m.group(1)) if m else 30
@@ -1161,6 +1193,19 @@ def _build_invoices_for_deal(deal: dict) -> list[dict]:
     per_invoice_amount = round((deal.get("amt") or 0) / period_count, 2)
     clean_id = re.sub(r"[^A-Za-z0-9]", "", str(deal["id"]))
 
+    # The even split above is the only honest total for a recurring invoice
+    # -- no contract here states different dollar amounts per period, so
+    # dividing the stated total evenly across periods isn't an invented
+    # number. What *was* wrong: every recurring invoice's lineItems got
+    # wiped to [] (see below), discarding the contract's real itemization
+    # even though it exists. Each period now carries that same real
+    # breakdown, each line proportionally divided -- an invoice shows what
+    # it's actually billing instead of one opaque lump sum.
+    period_items = (
+        [{**li, "amount": round((li.get("amount") or 0) / period_count, 2)} for li in items]
+        if period_count > 1 else items
+    )
+
     invoices = []
     for i in range(period_count):
         inv_id = f"INV-{clean_id}-{i + 1}" if period_count > 1 else f"INV-{clean_id}"
@@ -1176,7 +1221,7 @@ def _build_invoices_for_deal(deal: dict) -> list[dict]:
             "milestone": milestone, "amount": per_invoice_amount, "dueDate": due_date,
             "stage": "draft", "prio": deal.get("prio") or "med", "linkedDealId": deal["id"],
             "real": True, "approvedAt": datetime.now().isoformat(),
-            "lineItems": items if period_count == 1 else [],
+            "lineItems": period_items,
             "billingEmail": deal.get("billingEmail"),
             "seriesIndex": i + 1, "seriesCount": period_count,
         })
@@ -1362,13 +1407,17 @@ font-weight:600;cursor:pointer;font-size:14px}}
         if path == "/api/cash":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             cash, error = get_cash(force_refresh=force)
-            self._send_json({**cash, "error": error, "computed_at": _cash_cache["computed_at"]})
+            notes = _load_credit_notes()
+            matched = [{**p, "creditNote": notes[p["qb"]]} if p.get("qb") in notes else p for p in cash.get("matched", [])]
+            self._send_json({**cash, "matched": matched, "error": error, "computed_at": _cash_cache["computed_at"]})
             return
 
         if path == "/api/collections":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             collections, error = get_collections(force_refresh=force)
-            self._send_json({"collections": collections, "error": error, "computed_at": _collections_cache["computed_at"]})
+            writeoffs = _load_writeoffs()
+            merged = [{**c, "writeoff": writeoffs[c["id"]]} if c["id"] in writeoffs else c for c in collections]
+            self._send_json({"collections": merged, "error": error, "computed_at": _collections_cache["computed_at"]})
             return
 
         if path == "/api/deals/reconciliation":
@@ -1597,6 +1646,65 @@ font-weight:600;cursor:pointer;font-size:14px}}
             _save_real_invoices(invoices)
         self._send_json({"ok": True})
 
+    def _submit_writeoff(self, coll_id: str, payload: dict) -> None:
+        """Persists a writeoff request against a real overdue invoice --
+        previously submitWriteoff() in emma_workspace.html only showed a
+        success toast with nothing saved anywhere, so the same invoice
+        could be "written off" again from a different browser with no
+        record the request had already been made. Keyed by the collections
+        row id (COLL-<qbo id>), not the Invoice Pipeline's own INV-<deal
+        id> scheme -- collections rows come from QBO's aging data and
+        aren't reliably joinable to a pipeline-drafted invoice."""
+        collections, _ = get_collections()
+        row = next((c for c in collections if c["id"] == coll_id), None)
+        if not row:
+            self._send_json({"ok": False, "error": "Collection entry not found"})
+            return
+        if not row.get("real"):
+            self._send_json({"ok": False, "error": "Not a real invoice -- nothing to persist server-side"})
+            return
+        writeoff = {
+            "invoiceRef": row["inv"], "customer": row["c"], "amount": payload.get("amount"),
+            "reason": payload.get("reason"), "approver": payload.get("approver"),
+            "glAccount": payload.get("glAccount"), "requestedAt": datetime.now().isoformat(),
+            "status": "pending_approval",
+        }
+        with _invoices_lock:
+            writeoffs = _load_writeoffs()
+            writeoffs[coll_id] = writeoff
+            _save_writeoffs(writeoffs)
+        self._send_json({"ok": True, "writeoff": writeoff})
+
+    def _submit_credit_note(self, payment_id: str, payload: dict) -> None:
+        """Persists a credit note request against a real overpaid QuickBooks
+        payment -- previously submitCreditNote() in emma_workspace.html only
+        showed a success toast with nothing saved anywhere. Keyed by the QBO
+        payment id (the same id compute_cash() and the payment_overpaid
+        incident both already use), not an invoice id -- a credit note here
+        responds to one specific overpayment event, not the invoice at large."""
+        cash, _ = get_cash()
+        row = next((p for p in (cash or {}).get("matched", []) if p.get("qb") == payment_id), None)
+        if not row:
+            self._send_json({"ok": False, "error": "Payment not found"})
+            return
+        if not row.get("real"):
+            self._send_json({"ok": False, "error": "Not a real payment -- nothing to persist server-side"})
+            return
+        note = {
+            "customer": payload.get("customer") or row.get("c"),
+            "invoiceRef": payload.get("inv") or row.get("inv"),
+            "amount": payload.get("amount"),
+            "reason": payload.get("reason"),
+            "application": payload.get("application"),
+            "requestedAt": datetime.now().isoformat(),
+            "status": "pending_approval",
+        }
+        with _invoices_lock:
+            notes = _load_credit_notes()
+            notes[payment_id] = note
+            _save_credit_notes(notes)
+        self._send_json({"ok": True, "creditNote": note})
+
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
@@ -1639,6 +1747,16 @@ font-weight:600;cursor:pointer;font-size:14px}}
         if path.startswith("/api/invoices/") and path.endswith("/mark-paid"):
             inv_id = path[len("/api/invoices/"):-len("/mark-paid")]
             self._mark_invoice(inv_id, "paid", self._read_json_body())
+            return
+
+        if path.startswith("/api/collections/") and path.endswith("/writeoff"):
+            coll_id = path[len("/api/collections/"):-len("/writeoff")]
+            self._submit_writeoff(coll_id, self._read_json_body())
+            return
+
+        if path.startswith("/api/cash/") and path.endswith("/credit-note"):
+            payment_id = path[len("/api/cash/"):-len("/credit-note")]
+            self._submit_credit_note(payment_id, self._read_json_body())
             return
 
         if path == "/api/collections/reminders/run":
