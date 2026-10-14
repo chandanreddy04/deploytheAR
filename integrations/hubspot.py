@@ -67,25 +67,39 @@ class HubSpotClient:
     def __init__(self, token: str):
         self.h = {"Authorization": f"Bearer {token}"}
 
-    def list_closed_deals(self, since: str | None = None, limit: int = 50) -> list[Deal]:
-        """Deals in the closedwon stage, most recently modified first.
+    def list_closed_deals(self, since: str | None = None) -> list[Deal]:
+        """Every deal in the closedwon stage, most recently modified first.
 
         A webhook (deal.propertyChange on dealstage) is the real-time version
         of this; polling with a `since` watermark is the fallback used here.
+
+        HubSpot's search API caps a single page at 100 results, so this
+        pages through with the `after` cursor it returns until exhausted --
+        a fixed one-page `limit` would silently drop every closed deal past
+        the cap (seen with only 10 returned while far more existed).
         """
         filters = [{"propertyName": "dealstage", "operator": "EQ", "value": "closedwon"}]
         if since:
             filters.append(
                 {"propertyName": "hs_lastmodifieddate", "operator": "GTE", "value": _to_millis(since)}
             )
-        body = {
-            "filterGroups": [{"filters": filters}],
-            "properties": ["dealname", "dealstage", "amount"],
-            "limit": limit,
-            "sorts": [{"propertyName": "hs_lastmodifieddate", "direction": "DESCENDING"}],
-        }
-        res = _http.request("POST", f"{API}/crm/v3/objects/deals/search", headers=self.h, json_body=body)
-        return [self.get_deal(r["id"]) for r in res.get("results", [])]
+        results: list[dict] = []
+        after: str | None = None
+        while True:
+            body = {
+                "filterGroups": [{"filters": filters}],
+                "properties": ["dealname", "dealstage", "amount"],
+                "limit": 100,
+                "sorts": [{"propertyName": "hs_lastmodifieddate", "direction": "DESCENDING"}],
+            }
+            if after:
+                body["after"] = after
+            res = _http.request("POST", f"{API}/crm/v3/objects/deals/search", headers=self.h, json_body=body)
+            results.extend(res.get("results", []))
+            after = res.get("paging", {}).get("next", {}).get("after")
+            if not after:
+                break
+        return [self.get_deal(r["id"]) for r in results]
 
     def get_deal(self, deal_id: str) -> Deal:
         res = _http.request(

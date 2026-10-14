@@ -22,12 +22,15 @@ Usage:
 
 from __future__ import annotations
 
+import calendar
+import hmac
 import json
 import re
+import secrets
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -44,6 +47,13 @@ from db import db_load as _db_load, db_save as _db_save
 from pdf_text import extract_text
 
 UI_DIR = Path(__file__).parent
+
+# Simple shared-password gate (see Settings.app_password). Valid session
+# tokens live only in memory -- a restart logs everyone out, which is an
+# acceptable trade-off for a single shared password protecting a single-
+# replica deployment, not a reason to add a persistence layer for it.
+_valid_sessions: set[str] = set()
+_SESSION_COOKIE = "emma_session"
 
 _cache: dict = {"deals": None, "computed_at": 0.0, "error": None, "skipped": []}
 _cash_cache: dict = {"cash": None, "computed_at": 0.0, "error": None}
@@ -274,7 +284,7 @@ def compute_deals(prior_by_id: dict[str, dict] | None = None) -> tuple[list[dict
     # error text. amount rides along since it's already on hand and useful
     # for prioritizing which skipped deal to chase down first.
     skipped: list[tuple[str, str, str, str, float]] = []
-    for deal in client.list_closed_deals(limit=10):
+    for deal in client.list_closed_deals():
         if not deal.agreement_ref:
             # Previously just `continue` -- the deal vanished with no
             # record anywhere that it was ever seen, let alone why it's
@@ -423,9 +433,16 @@ def compute_cash() -> dict:
 
     client = QboClient(settings)
     all_payments, _ = client.list_payments_since(None)
-    all_invoices = client.list_invoices(limit=50)
+    all_invoices = client.list_invoices()
     payments = [p for p in all_payments if _normalize_customer_name(p.customer_name) in real_customer_keys]
     invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
+
+    # Keyed by DocNumber so a matched payment can be compared against its
+    # own linked invoice's real TotalAmt below -- only ever used when a
+    # payment links to exactly one invoice (see the overpayment check),
+    # since a split payment's own per-invoice allocation isn't captured
+    # anywhere in QboPayment.
+    invoices_by_docnum = {i.get("DocNumber"): i for i in invoices if i.get("DocNumber")}
 
     matched, unmatched = [], []
     for p in payments:
@@ -439,6 +456,13 @@ def compute_cash() -> dict:
         if p.linked_invoice_numbers:
             row["inv"] = ", ".join(p.linked_invoice_numbers)
             row["conf"] = 1.0  # QBO's own LinkedTxn -- a fact, not a fuzzy guess
+            if len(p.linked_invoice_numbers) == 1:
+                linked_inv = invoices_by_docnum.get(p.linked_invoice_numbers[0])
+                if linked_inv:
+                    inv_total = float(linked_inv.get("TotalAmt") or 0)
+                    over = round(p.total_amount - inv_total, 2)
+                    if over > 0.01:
+                        row["over"] = over
             matched.append(row)
         else:
             row["inv"] = "—"
@@ -525,7 +549,7 @@ def compute_deal_reconciliation() -> list[dict]:
 
     deals, _ = get_deals()
     client = QboClient(settings)
-    qbo_invoices = client.list_invoices(limit=50)
+    qbo_invoices = client.list_invoices()
 
     by_customer: dict[str, list[dict]] = {}
     for inv in qbo_invoices:
@@ -566,6 +590,42 @@ def compute_deal_reconciliation() -> list[dict]:
     return out
 
 
+def _record_recon_trend_snapshot(recon_data: list[dict]) -> None:
+    """Records today's real unmatched total (sum of partial/unpaid QBO
+    balances) into durable day-by-day history. This is the only way this
+    app gets a real trend without a background scheduler (a standing rule
+    here, never add one) -- each genuine recompute of deal reconciliation
+    overwrites *today's own* entry, so the chart reflects actual usage
+    instead of a fabricated history. A date stops being "today" the
+    moment the calendar rolls over, and nothing ever touches a past
+    date's entry again, so it becomes a fixed historical data point from
+    whatever today's last real recompute happened to show."""
+    today_iso = date.today().isoformat()
+    unmatched_total = sum(
+        (d.get("qboBalance") or 0) for d in recon_data
+        if d.get("status") in ("partial", "unpaid")
+    )
+    history, _, _ = _db_load("recon_trend")
+    history = history or {}
+    history[today_iso] = round(unmatched_total, 2)
+    _db_save("recon_trend", history, time.time(), None)
+
+
+def _recon_trend_last_14_days() -> list[dict]:
+    """The last 14 calendar days, each with whatever real snapshot exists
+    for it -- 'tracked': false for any day before this feature started
+    recording, so the frontend can show an honest gap instead of a
+    fabricated zero for days that were never actually observed."""
+    history, _, _ = _db_load("recon_trend")
+    history = history or {}
+    today = date.today()
+    out = []
+    for i in range(13, -1, -1):
+        iso = (today - timedelta(days=i)).isoformat()
+        out.append({"date": iso, "amount": history.get(iso), "tracked": iso in history})
+    return out
+
+
 def get_deal_reconciliation(force_refresh: bool = False) -> tuple[list[dict], str | None]:
     if _deal_recon_cache["data"] is None and not force_refresh:
         data, computed_at, error = _db_load("deal_reconciliation")
@@ -580,6 +640,7 @@ def get_deal_reconciliation(force_refresh: bool = False) -> tuple[list[dict], st
                 try:
                     _deal_recon_cache["data"] = compute_deal_reconciliation()
                     _deal_recon_cache["error"] = None
+                    _record_recon_trend_snapshot(_deal_recon_cache["data"])
                 except Exception as exc:
                     _deal_recon_cache["error"] = str(exc)
                     if _deal_recon_cache["data"] is None:
@@ -617,7 +678,7 @@ def _real_outstanding_invoices() -> list[dict]:
     real_customer_keys.discard("")
 
     client = QboClient(settings)
-    all_invoices = client.list_invoices(limit=50)
+    all_invoices = client.list_invoices()
     invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
     today = date.today()
 
@@ -732,7 +793,7 @@ def compute_monthly_summary() -> dict:
     real_customer_keys.discard("")
 
     client = QboClient(settings)
-    all_invoices = client.list_invoices(limit=50)
+    all_invoices = client.list_invoices()
     invoices = [i for i in all_invoices if _normalize_customer_name(i.get("CustomerRef", {}).get("name", "")) in real_customer_keys]
     all_payments, _ = client.list_payments_since(None)
     payments = [p for p in all_payments if _normalize_customer_name(p.customer_name) in real_customer_keys]
@@ -1044,19 +1105,208 @@ def run_reminder_cycle() -> dict:
     }
 
 
+# ===========================================================================
+# REAL INVOICE PERSISTENCE -- previously this entire layer only existed in
+# the browser's own JS state (createOrUpdateInvoiceFromDeal() in
+# emma_workspace.html), so an approval and the invoice it created vanished
+# on reload and were never visible to a second browser/user. Durable via
+# the same db.py cache_store every other real data type already uses, just
+# under keys ("deal_reviews", "real_invoices") that are never recomputed
+# from an external API -- they only change in response to a real human
+# action (approve, send, a matched payment), so there's no TTL/staleness
+# concept here the way deals/cash/collections have.
+# ===========================================================================
+_invoices_lock = threading.Lock()
+
+
+def _load_deal_reviews() -> dict:
+    data, _, _ = _db_load("deal_reviews")
+    return data or {}
+
+
+def _save_deal_reviews(reviews: dict) -> None:
+    _db_save("deal_reviews", reviews, time.time(), None)
+
+
+def _load_real_invoices() -> dict:
+    data, _, _ = _db_load("real_invoices")
+    return data or {}
+
+
+def _save_real_invoices(invoices: dict) -> None:
+    _db_save("real_invoices", invoices, time.time(), None)
+
+
+def _load_writeoffs() -> dict:
+    data, _, _ = _db_load("writeoffs")
+    return data or {}
+
+
+def _save_writeoffs(writeoffs: dict) -> None:
+    _db_save("writeoffs", writeoffs, time.time(), None)
+
+
+def _load_credit_notes() -> dict:
+    data, _, _ = _db_load("credit_notes")
+    return data or {}
+
+
+def _save_credit_notes(notes: dict) -> None:
+    _db_save("credit_notes", notes, time.time(), None)
+
+
+def _due_date_from_terms(terms: str | None) -> str:
+    m = re.search(r"Net\s*(\d+)", terms or "", re.IGNORECASE)
+    days = int(m.group(1)) if m else 30
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def _add_months(iso_date: str, months: int) -> str:
+    d = date.fromisoformat(iso_date)
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])  # clamp e.g. Jan 31 + 1mo -> Feb 28
+    return date(year, month, day).isoformat()
+
+
+def _schedule_interval_months(schedule: str | None) -> int | None:
+    return {"monthly": 1, "quarterly": 3, "annual": 12}.get(schedule or "")
+
+
+def _build_invoices_for_deal(deal: dict) -> list[dict]:
+    """Python port of emma_workspace.html's createOrUpdateInvoiceFromDeal() --
+    same even-split-across-periods logic, now run once server-side on
+    approval instead of purely in the approving browser's memory."""
+    items = deal.get("lineItems") or []
+    contract = deal.get("contract") or {}
+    ctag = f"{deal['id']} · {contract.get('filename') or deal.get('c')}"
+    base_due = _due_date_from_terms(deal.get("terms"))
+    interval = _schedule_interval_months(deal.get("invoicingSchedule"))
+
+    period_count = 1
+    if interval and deal.get("termMonths"):
+        period_count = max(1, round(deal["termMonths"] / interval))
+    elif interval:
+        period_count = 12 if interval == 1 else 4 if interval == 3 else 1
+
+    per_invoice_amount = round((deal.get("amt") or 0) / period_count, 2)
+    clean_id = re.sub(r"[^A-Za-z0-9]", "", str(deal["id"]))
+
+    # The even split above is the only honest total for a recurring invoice
+    # -- no contract here states different dollar amounts per period, so
+    # dividing the stated total evenly across periods isn't an invented
+    # number. What *was* wrong: every recurring invoice's lineItems got
+    # wiped to [] (see below), discarding the contract's real itemization
+    # even though it exists. Each period now carries that same real
+    # breakdown, each line proportionally divided -- an invoice shows what
+    # it's actually billing instead of one opaque lump sum.
+    period_items = (
+        [{**li, "amount": round((li.get("amount") or 0) / period_count, 2)} for li in items]
+        if period_count > 1 else items
+    )
+
+    invoices = []
+    for i in range(period_count):
+        inv_id = f"INV-{clean_id}-{i + 1}" if period_count > 1 else f"INV-{clean_id}"
+        due_date = _add_months(base_due, interval * i) if interval else base_due
+        if period_count > 1:
+            milestone = f"Recurring {deal.get('invoicingSchedule')} invoice {i + 1} of {period_count}"
+        elif items:
+            milestone = f"{len(items)} line item{'s' if len(items) != 1 else ''} · from contract"
+        else:
+            milestone = "Contract total · line items not extracted"
+        invoices.append({
+            "id": inv_id, "client": "Rally UXR", "customer": deal.get("c"), "ctag": ctag,
+            "milestone": milestone, "amount": per_invoice_amount, "dueDate": due_date,
+            "stage": "draft", "prio": deal.get("prio") or "med", "linkedDealId": deal["id"],
+            "real": True, "approvedAt": datetime.now().isoformat(),
+            "lineItems": period_items,
+            "billingEmail": deal.get("billingEmail"),
+            "seriesIndex": i + 1, "seriesCount": period_count,
+        })
+    return invoices
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "EmmaUI/0.1"
 
     def log_message(self, fmt, *args) -> None:
         sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
 
-    def _send_json(self, payload) -> None:
+    def _send_json(self, payload, status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _get_cookie(self, name: str) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            part = part.strip()
+            if part.startswith(name + "="):
+                return part[len(name) + 1:]
+        return None
+
+    def _is_authed(self) -> bool:
+        settings = load_settings()
+        if not settings.app_password:
+            return True  # gate not configured for this environment
+        token = self._get_cookie(_SESSION_COOKIE)
+        return bool(token) and token in _valid_sessions
+
+    def _serve_login_page(self, error: str | None = None) -> None:
+        msg = f'<p class="err">{error}</p>' if error else ""
+        html = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Emma</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;background:#f5f5f6;display:flex;
+align-items:center;justify-content:center;height:100vh;margin:0}}
+.box{{background:#fff;padding:32px 36px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.08);width:280px}}
+h1{{font-size:18px;margin:0 0 18px;color:#111}}
+input{{width:100%;padding:9px 10px;border:1px solid #d9d9dd;border-radius:6px;font-size:14px;
+box-sizing:border-box;margin-bottom:12px}}
+button{{width:100%;padding:10px;border:none;border-radius:6px;background:#7c5cfc;color:#fff;
+font-weight:600;cursor:pointer;font-size:14px}}
+.err{{color:#c00;font-size:13px;margin:0 0 12px}}
+</style></head><body><div class="box"><h1>Sign in</h1>{msg}
+<form method="POST" action="/login">
+<input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">
+<button type="submit">Sign in</button>
+</form></div></body></html>"""
+        body = html.encode("utf-8")
+        self.send_response(401 if error else 200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_login(self) -> None:
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        submitted = parse_qs(raw).get("password", [""])[0]
+        settings = load_settings()
+        if settings.app_password and hmac.compare_digest(submitted, settings.app_password):
+            token = secrets.token_urlsafe(32)
+            _valid_sessions.add(token)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie", f"{_SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Lax")
+            self.end_headers()
+        else:
+            self._serve_login_page(error="Incorrect password")
+
+    def _handle_logout(self) -> None:
+        token = self._get_cookie(_SESSION_COOKIE)
+        if token:
+            _valid_sessions.discard(token)
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", f"{_SESSION_COOKIE}=; Path=/; Max-Age=0")
+        self.end_headers()
 
     def _serve_deal_pdf(self, deal_id: str) -> None:
         """Serves the real signed PDF from HubSpot so the UI can show the
@@ -1126,28 +1376,57 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        if path == "/logout":
+            self._handle_logout()
+            return
+
+        if not self._is_authed():
+            if path.startswith("/api/"):
+                self._send_json({"error": "Not authenticated"}, status=401)
+            else:
+                self._serve_login_page()
+            return
+
         if path == "/api/deals":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             deals, error = get_deals(force_refresh=force)
-            self._send_json({"deals": deals, "error": error, "computed_at": _cache["computed_at"], "skipped": _cache["skipped"]})
+            # Merge in the real, durable review status -- without this, a
+            # deal approved in one browser session looks "awaiting review"
+            # again to anyone else (or the same person after a reload),
+            # since compute_deals() itself has no concept of approval.
+            reviews = _load_deal_reviews()
+            merged = [{**d, "review": reviews[d["id"]]["status"]} if d["id"] in reviews else d for d in deals]
+            self._send_json({"deals": merged, "error": error, "computed_at": _cache["computed_at"], "skipped": _cache["skipped"]})
+            return
+
+        if path == "/api/invoices":
+            invoices = _load_real_invoices()
+            self._send_json({"invoices": list(invoices.values())})
             return
 
         if path == "/api/cash":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             cash, error = get_cash(force_refresh=force)
-            self._send_json({**cash, "error": error, "computed_at": _cash_cache["computed_at"]})
+            notes = _load_credit_notes()
+            matched = [{**p, "creditNote": notes[p["qb"]]} if p.get("qb") in notes else p for p in cash.get("matched", [])]
+            self._send_json({**cash, "matched": matched, "error": error, "computed_at": _cash_cache["computed_at"]})
             return
 
         if path == "/api/collections":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             collections, error = get_collections(force_refresh=force)
-            self._send_json({"collections": collections, "error": error, "computed_at": _collections_cache["computed_at"]})
+            writeoffs = _load_writeoffs()
+            merged = [{**c, "writeoff": writeoffs[c["id"]]} if c["id"] in writeoffs else c for c in collections]
+            self._send_json({"collections": merged, "error": error, "computed_at": _collections_cache["computed_at"]})
             return
 
         if path == "/api/deals/reconciliation":
             force = parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"
             recon, error = get_deal_reconciliation(force_refresh=force)
-            self._send_json({"reconciliation": recon, "error": error, "computed_at": _deal_recon_cache["computed_at"]})
+            self._send_json({
+                "reconciliation": recon, "error": error, "computed_at": _deal_recon_cache["computed_at"],
+                "trend": _recon_trend_last_14_days(),
+            })
             return
 
         if path == "/api/invoices/aging":
@@ -1240,13 +1519,13 @@ class Handler(BaseHTTPRequestHandler):
         """Actually emails a real invoice PDF to the customer. Only ever
         reached by a real POST from the UI's own Send button.
 
-        Invoices only ever exist in the browser's own JS state (built
-        client-side from an approved deal, never persisted server-side the
-        way deals/cash/collections are) -- so unlike those, this endpoint
-        can't look anything up by id. The client sends the full invoice
-        data it already has, and this only lays it out into a real PDF and
-        sends it; it never invents a customer, address, or amount that
-        wasn't already in that payload."""
+        Takes the full invoice data in the payload rather than looking it
+        up by id -- the client already has it on hand (e.g. from editing
+        the To/Subject/Body fields in the send drawer), and this only lays
+        it out into a real PDF and sends it; it never invents a customer,
+        address, or amount that wasn't already in that payload. The caller
+        is responsible for calling /api/invoices/<id>/mark-sent afterwards
+        to persist the stage change -- this endpoint only sends the email."""
         to = (payload.get("to") or "").strip()
         if not to:
             self._send_json({"ok": False, "error": "No recipient email address — cannot send"})
@@ -1314,6 +1593,118 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json({"ok": True, "messageId": message_id, "to": to})
 
+    def _approve_deal(self, deal_id: str) -> None:
+        """Approving a deal now creates real, durable invoice records
+        instead of only ever existing in the approving browser's memory --
+        this is what makes the approval and its invoice(s) survive a
+        reload and show up for a second browser/user. Idempotent: re-
+        approving a deal that already has invoices recreates them with the
+        deal's current extracted fields (e.g. after a re-extraction) rather
+        than duplicating a second set, same "create or update" semantics
+        the old client-side version had."""
+        deals, _ = get_deals()
+        deal = next((d for d in deals if d.get("id") == deal_id), None)
+        if not deal:
+            self._send_json({"ok": False, "error": "Deal not found"})
+            return
+        if not deal.get("real"):
+            self._send_json({"ok": False, "error": "Not a real deal -- nothing to persist server-side"})
+            return
+
+        with _invoices_lock:
+            new_invoices = _build_invoices_for_deal(deal)
+            all_invoices = _load_real_invoices()
+            for inv in new_invoices:
+                all_invoices[inv["id"]] = inv
+            _save_real_invoices(all_invoices)
+
+            reviews = _load_deal_reviews()
+            reviews[deal_id] = {"status": "approved", "approvedAt": datetime.now().isoformat()}
+            _save_deal_reviews(reviews)
+
+        self._send_json({"ok": True, "invoices": new_invoices})
+
+    def _mark_invoice(self, inv_id: str, stage: str, payload: dict) -> None:
+        """Persists a real invoice's stage change -- called after a real
+        Gmail send succeeds (stage='sent') or applyRealCashToInvoices()
+        matches a real QuickBooks payment to it (stage='paid'). Without
+        this, an invoice could be correctly marked Paid in one browser and
+        still show as Sent to everyone else."""
+        with _invoices_lock:
+            invoices = _load_real_invoices()
+            inv = invoices.get(inv_id)
+            if not inv:
+                self._send_json({"ok": False, "error": "Invoice not found"})
+                return
+            inv["stage"] = stage
+            if stage == "sent":
+                inv["sentAt"] = payload.get("sentAt") or datetime.now().isoformat()
+                inv["messageId"] = payload.get("messageId")
+                inv["sentTo"] = payload.get("sentTo")
+            elif stage == "paid":
+                inv["paidVia"] = payload.get("paidVia")
+            _save_real_invoices(invoices)
+        self._send_json({"ok": True})
+
+    def _submit_writeoff(self, coll_id: str, payload: dict) -> None:
+        """Persists a writeoff request against a real overdue invoice --
+        previously submitWriteoff() in emma_workspace.html only showed a
+        success toast with nothing saved anywhere, so the same invoice
+        could be "written off" again from a different browser with no
+        record the request had already been made. Keyed by the collections
+        row id (COLL-<qbo id>), not the Invoice Pipeline's own INV-<deal
+        id> scheme -- collections rows come from QBO's aging data and
+        aren't reliably joinable to a pipeline-drafted invoice."""
+        collections, _ = get_collections()
+        row = next((c for c in collections if c["id"] == coll_id), None)
+        if not row:
+            self._send_json({"ok": False, "error": "Collection entry not found"})
+            return
+        if not row.get("real"):
+            self._send_json({"ok": False, "error": "Not a real invoice -- nothing to persist server-side"})
+            return
+        writeoff = {
+            "invoiceRef": row["inv"], "customer": row["c"], "amount": payload.get("amount"),
+            "reason": payload.get("reason"), "approver": payload.get("approver"),
+            "glAccount": payload.get("glAccount"), "requestedAt": datetime.now().isoformat(),
+            "status": "pending_approval",
+        }
+        with _invoices_lock:
+            writeoffs = _load_writeoffs()
+            writeoffs[coll_id] = writeoff
+            _save_writeoffs(writeoffs)
+        self._send_json({"ok": True, "writeoff": writeoff})
+
+    def _submit_credit_note(self, payment_id: str, payload: dict) -> None:
+        """Persists a credit note request against a real overpaid QuickBooks
+        payment -- previously submitCreditNote() in emma_workspace.html only
+        showed a success toast with nothing saved anywhere. Keyed by the QBO
+        payment id (the same id compute_cash() and the payment_overpaid
+        incident both already use), not an invoice id -- a credit note here
+        responds to one specific overpayment event, not the invoice at large."""
+        cash, _ = get_cash()
+        row = next((p for p in (cash or {}).get("matched", []) if p.get("qb") == payment_id), None)
+        if not row:
+            self._send_json({"ok": False, "error": "Payment not found"})
+            return
+        if not row.get("real"):
+            self._send_json({"ok": False, "error": "Not a real payment -- nothing to persist server-side"})
+            return
+        note = {
+            "customer": payload.get("customer") or row.get("c"),
+            "invoiceRef": payload.get("inv") or row.get("inv"),
+            "amount": payload.get("amount"),
+            "reason": payload.get("reason"),
+            "application": payload.get("application"),
+            "requestedAt": datetime.now().isoformat(),
+            "status": "pending_approval",
+        }
+        with _invoices_lock:
+            notes = _load_credit_notes()
+            notes[payment_id] = note
+            _save_credit_notes(notes)
+        self._send_json({"ok": True, "creditNote": note})
+
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
@@ -1326,6 +1717,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        if path == "/login":
+            self._handle_login()
+            return
+
+        if not self._is_authed():
+            self._send_json({"ok": False, "error": "Not authenticated"}, status=401)
+            return
+
         if path.startswith("/api/collections/") and path.endswith("/send"):
             coll_id = path[len("/api/collections/"):-len("/send")]
             self._send_collection_email(coll_id, self._read_json_body())
@@ -1333,6 +1732,31 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/invoices/send":
             self._send_invoice_email(self._read_json_body())
+            return
+
+        if path.startswith("/api/deals/") and path.endswith("/approve"):
+            deal_id = path[len("/api/deals/"):-len("/approve")]
+            self._approve_deal(deal_id)
+            return
+
+        if path.startswith("/api/invoices/") and path.endswith("/mark-sent"):
+            inv_id = path[len("/api/invoices/"):-len("/mark-sent")]
+            self._mark_invoice(inv_id, "sent", self._read_json_body())
+            return
+
+        if path.startswith("/api/invoices/") and path.endswith("/mark-paid"):
+            inv_id = path[len("/api/invoices/"):-len("/mark-paid")]
+            self._mark_invoice(inv_id, "paid", self._read_json_body())
+            return
+
+        if path.startswith("/api/collections/") and path.endswith("/writeoff"):
+            coll_id = path[len("/api/collections/"):-len("/writeoff")]
+            self._submit_writeoff(coll_id, self._read_json_body())
+            return
+
+        if path.startswith("/api/cash/") and path.endswith("/credit-note"):
+            payment_id = path[len("/api/cash/"):-len("/credit-note")]
+            self._submit_credit_note(payment_id, self._read_json_body())
             return
 
         if path == "/api/collections/reminders/run":

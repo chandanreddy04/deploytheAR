@@ -107,12 +107,24 @@ class QboClient:
     # -- reads ------------------------------------------------------- #
     def list_payments_since(self, cursor: str | None) -> tuple[list[QboPayment], str]:
         since = cursor or "2020-01-01T00:00:00-00:00"
-        res = self._query(
-            "SELECT * FROM Payment "
-            f"WHERE MetaData.LastUpdatedTime > '{since}' "
-            "ORDERBY MetaData.LastUpdatedTime"
-        )
-        rows = res.get("QueryResponse", {}).get("Payment", [])
+        # No MAXRESULTS here means QBO silently caps the query at its own
+        # default page size -- paginate with STARTPOSITION so a batch of
+        # payments larger than one page never gets truncated.
+        rows: list[dict] = []
+        start = 1
+        page_size = 1000
+        while True:
+            res = self._query(
+                "SELECT * FROM Payment "
+                f"WHERE MetaData.LastUpdatedTime > '{since}' "
+                "ORDERBY MetaData.LastUpdatedTime "
+                f"STARTPOSITION {start} MAXRESULTS {page_size}"
+            )
+            page = res.get("QueryResponse", {}).get("Payment", [])
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
         payments = [self._to_payment(r) for r in rows]
         new_cursor = rows[-1]["MetaData"]["LastUpdatedTime"] if rows else since
         return payments, new_cursor
@@ -126,18 +138,31 @@ class QboClient:
         rows = res.get("QueryResponse", {}).get("Invoice", [])
         return float(rows[0]["Balance"]) if rows else None
 
-    def list_invoices(self, limit: int = 20) -> list[dict]:
+    def list_invoices(self) -> list[dict]:
         """Not in the original rally-ar-agent client -- added for exploring
         what sample data a sandbox actually has before building anything
         that depends on its shape. DueDate/TxnDate/BillEmail added for the
         collections/dunning feature -- overdue detection needs a real due
         date, and a real send-to address needs the invoice's own BillEmail
-        (not fabricated from the customer name)."""
-        res = self._query(
-            "SELECT Id, DocNumber, TotalAmt, Balance, CustomerRef, DueDate, TxnDate, BillEmail "
-            f"FROM Invoice MAXRESULTS {limit}"
-        )
-        return res.get("QueryResponse", {}).get("Invoice", [])
+        (not fabricated from the customer name).
+
+        Paginates with STARTPOSITION/MAXRESULTS so a QBO instance with more
+        invoices than one page (e.g. 100+) doesn't get silently truncated --
+        a fixed one-page limit previously hid every invoice past it."""
+        rows: list[dict] = []
+        start = 1
+        page_size = 1000
+        while True:
+            res = self._query(
+                "SELECT Id, DocNumber, TotalAmt, Balance, CustomerRef, DueDate, TxnDate, BillEmail "
+                f"FROM Invoice STARTPOSITION {start} MAXRESULTS {page_size}"
+            )
+            page = res.get("QueryResponse", {}).get("Invoice", [])
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+        return rows
 
     def _invoice_docnumber(self, txn_id: str) -> str:
         if txn_id in self._docnum_cache:

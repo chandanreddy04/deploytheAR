@@ -605,6 +605,7 @@ select.f,input.f{padding:6px 10px;border:1px solid var(--border);border-radius:6
 
     <div class="foot">
       <button class="btn sm" onclick="resetPrototype()">Reset prototype data</button>
+      <a class="btn sm" href="/logout" style="display:block;text-align:center;text-decoration:none;margin-top:6px">Sign out</a>
     </div>
   </aside>
 
@@ -1288,17 +1289,23 @@ const APPROVALS = [
   {inv:'INV-2026-09-1184', c:'Riverline Holdings',  amt:9500,   deal:'HS-9119', approver:'Sam Ortiz',   age:4,  esc:'in 20h (finance)'},
 ];
 
+// Both now read the live, editable APPROVAL_MATRIX (Config tab) instead of
+// their own hardcoded $5K/$50K/$250K copies of the same thresholds -- those
+// two copies used to silently diverge the moment someone edited the matrix,
+// since saveApprovalMatrix() had no reader anywhere in the app.
+function approvalTierFor(amt){
+  return APPROVAL_MATRIX.find(t => amt >= t.min && amt < t.max) || APPROVAL_MATRIX[APPROVAL_MATRIX.length-1];
+}
 function amtTier(a){
-  if(a<5000) return 'green';
-  if(a<50000) return 'amber';
-  if(a<250000) return 'orange';
+  const t = approvalTierFor(a);
+  if(t.tier===1) return 'green';
+  if(t.tier===2) return 'amber';
+  if(t.tier===3) return 'orange';
   return 'red';
 }
 function amtTierLabel(a){
-  if(a<5000) return 'auto';
-  if(a<50000) return 'deal owner';
-  if(a<250000) return 'finance lead';
-  return 'CFO';
+  const t = approvalTierFor(a);
+  return t.approver === 'Auto-approved by Emma' ? 'auto' : t.approver;
 }
 function money(n){ return '$'+n.toLocaleString(); }
 
@@ -1454,6 +1461,15 @@ const CASH_PARTIAL = [
 // Drives both the "Deal payment status" table and the Daily reconciliation
 // tiles/variance breakdown above it, so both sections tell the same story.
 let DEAL_RECON = [];
+// Real day-by-day unmatched-total history, from the same /api/deals/
+// reconciliation call -- each entry has tracked:false for a day before
+// this feature existed, so the chart can show an honest gap instead of
+// a fabricated zero for days nothing was actually recorded.
+let REAL_RECON_TREND = [];
+// Whichever variance rows renderReconTiles() last actually put on screen
+// (real or demo) -- exportReconReport() reads this instead of always
+// exporting the hardcoded demo array regardless of what's visible.
+let CURRENT_RECON_VARIANCE_ROWS = [];
 
 const DUNNING_STAGES = ['Reminder','First notice','Second notice','Final demand','Escalated','Writeoff review'];
 const COLLECTIONS = [
@@ -2117,7 +2133,7 @@ function renderPipeline(){
     const chip = `<span class="pill ${s.tone} dot">${s.label}</span>`;
     const isAwaiting = s.key === 'awaiting';
     const approveBtn = isAwaiting
-      ? `<button class="btn primary sm" onclick="event.stopPropagation();approveDeal('${d.id}')">Approve</button>`
+      ? `<button class="btn primary sm" onclick="event.stopPropagation();requestApproveDeal('${d.id}')">Approve</button>`
       : '';
     const liveChip = d.real ? `<span class="pill green dot" style="font-size:9.5px">Live</span>` : '';
     return `<tr onclick="openDealDrawer('${d.id}')">
@@ -2178,105 +2194,12 @@ document.addEventListener('keydown', function(e){
   setDealReviewFilter(tile.dataset.drfilter);
 });
 
-function _dueDateFromTerms(terms){
-  const m = /Net\s*(\d+)/i.exec(terms||'');
-  const days = m ? parseInt(m[1],10) : 30;
-  const dt = new Date();
-  dt.setDate(dt.getDate() + days);
-  return dt.toISOString().slice(0,10);
-}
-
 function _addMonths(dateStr, months){
   const d = new Date(dateStr + 'T00:00:00');
   d.setMonth(d.getMonth() + months);
   return d.toISOString().slice(0,10);
 }
 
-// monthly/quarterly/annual -> the interval in months; one_time/unset -> null
-function _scheduleIntervalMonths(schedule){
-  if(schedule === 'monthly') return 1;
-  if(schedule === 'quarterly') return 3;
-  if(schedule === 'annual') return 12;
-  return null;
-}
-
-// Creates (or, on re-approve, updates in place) real Invoice Pipeline
-// entries from an extracted deal's autofilled fields -- this is what makes
-// "Approve deal" actually issue something, instead of just flipping a
-// status flag with no invoice record behind it.
-//
-// A one-time (or unstated) invoicing schedule creates a single invoice,
-// same as before. A real, extracted-or-user-set recurring schedule
-// creates a full series spaced by that interval. The itemized per-period
-// schedule isn't something we extract, so each invoice in the series
-// gets an even split of the contract total -- an honest default, not an
-// invented breakdown. Returns the array of invoices created/updated
-// (length 1 for one-time).
-function createOrUpdateInvoiceFromDeal(d){
-  const items = _dealLineItems(d);
-  const pool = INVOICE_PIPELINE.rally;
-  const ctag = d.id + ' · ' + (d.contract ? d.contract.filename : d.c);
-  const baseDueDate = _dueDateFromTerms(d.terms);
-  const intervalMonths = _scheduleIntervalMonths(d.invoicingSchedule);
-
-  let periodCount = 1;
-  if(intervalMonths && d.termMonths){
-    periodCount = Math.max(1, Math.round(d.termMonths / intervalMonths));
-  } else if(intervalMonths){
-    // A recurring cadence is stated but the contract term length isn't --
-    // still demonstrate real recurring behavior rather than silently
-    // collapsing to one invoice, using a conservative default count.
-    periodCount = intervalMonths === 1 ? 12 : intervalMonths === 3 ? 4 : 1;
-  }
-  const perInvoiceAmount = Math.round((d.amt / periodCount) * 100) / 100;
-
-  const created = [];
-  for(let i = 0; i < periodCount; i++){
-    const invId = periodCount > 1
-      ? 'INV-' + String(d.id).replace(/[^A-Za-z0-9]/g,'') + '-' + (i + 1)
-      : 'INV-' + String(d.id).replace(/[^A-Za-z0-9]/g,'');
-    const dueDate = intervalMonths ? _addMonths(baseDueDate, intervalMonths * i) : baseDueDate;
-    const milestone = periodCount > 1
-      ? 'Recurring ' + d.invoicingSchedule + ' invoice ' + (i + 1) + ' of ' + periodCount
-      : (items.length ? items.length + ' line item' + (items.length===1?'':'s') + ' · from contract' : 'Contract total · line items not extracted');
-
-    let inv = pool.find(x=>x.id===invId);
-    if(inv){
-      inv.amount = perInvoiceAmount;
-      inv.dueDate = dueDate;
-      inv.milestone = milestone;
-      inv.ctag = ctag;
-      inv.customer = d.c;
-      inv.lineItems = periodCount === 1 ? items : [];
-      inv.billingEmail = d.billingEmail || null;
-      inv.seriesIndex = i + 1;
-      inv.seriesCount = periodCount;
-      inv.approvedAt = (typeof nowStamp === 'function' ? nowStamp(0) : new Date().toISOString());
-    } else {
-      inv = {
-        id: invId,
-        client: 'Rally UXR',
-        customer: d.c,
-        ctag: ctag,
-        milestone: milestone,
-        amount: perInvoiceAmount,
-        dueDate: dueDate,
-        stage: 'draft',
-        prio: d.prio || 'med',
-        linkedDealId: d.id,
-        real: true,
-        approvedAt: (typeof nowStamp === 'function' ? nowStamp(0) : new Date().toISOString()),
-        lineItems: periodCount === 1 ? items : [],
-        billingEmail: d.billingEmail || null,
-        seriesIndex: i + 1,
-        seriesCount: periodCount,
-      };
-      pool.unshift(inv);
-    }
-    created.push(inv);
-  }
-  return created;
-}
 
 // Actually emails a real invoice PDF to the customer via /api/invoices/send
 // -- builds the real PDF server-side from real deal/line-item data and
@@ -2335,6 +2258,13 @@ async function sendRealInvoiceEmail(invId){
     inv.sentAt = new Date().toISOString();
     inv.messageId = payload.messageId;
     inv.sentTo = payload.to;
+    // Persist the stage change server-side -- the email itself already
+    // sent successfully, so a failure here is quiet bookkeeping, not
+    // something to interrupt the send confirmation over.
+    fetch('/api/invoices/' + encodeURIComponent(inv.id) + '/mark-sent', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sentAt: inv.sentAt, messageId: inv.messageId, sentTo: inv.sentTo})
+    }).catch(()=>{});
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
         ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
@@ -2356,38 +2286,70 @@ async function sendRealInvoiceEmail(invId){
   }
 }
 
-function approveDeal(id){
+// Gate in front of approveDeal() -- previously the Approve button called
+// approveDeal() directly regardless of amount, so editing the matrix in
+// Config (saveApprovalMatrix()) had no effect anywhere. A real deal whose
+// amount lands in a tier above auto-approval now needs an explicit
+// confirmation naming the required approver, read live off APPROVAL_MATRIX,
+// before approveDeal() runs. Mock deals and auto-approve-tier real deals
+// keep the exact one-click behavior they always had.
+function requestApproveDeal(id){
+  const d = findDeal(id); if(!d) return;
+  if(!d.real){ approveDeal(id); closeDrawer(); return; }
+  const t = approvalTierFor(d.amt || 0);
+  if(t.approver === 'Auto-approved by Emma'){ approveDeal(id); closeDrawer(); return; }
+  openDrawer('Approval required · '+d.id, `${customerFor(d)||d.c||''} · ${money(d.amt||0)}`, `
+    <div class="dsec"><h4>Tier ${t.tier} approval</h4>
+      <div style="font-size:12.5px;color:var(--text-2);line-height:1.5">This deal's amount (${money(d.amt||0)}) falls in Tier ${t.tier} of the approval matrix (Config tab), which requires sign-off from <b>${esc(t.approver)}</b> before invoicing unlocks.</div>
+    </div>
+  `, `<button class="btn" onclick="closeDrawer()">Cancel</button>
+      <button class="btn primary" onclick="approveDeal('${id}');closeDrawer()">Approve as ${esc(t.approver)}</button>`);
+}
+async function approveDeal(id){
   const d = findDeal(id); if(!d) return;
   const dealReviewBefore = d.review;
-  d.review = 'approved';
   if(d.real){
-    const invs = createOrUpdateInvoiceFromDeal(d);
-    const first = invs[0];
-    if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
-      AUDIT.unshift({
-        ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
-        ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
-        target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
-          ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
-          : 'invoice autofilled from extracted contract terms'),
-        before: {dealId: d.id, review: dealReviewBefore},
-        after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
-      });
+    try{
+      const res = await fetch('/api/deals/' + encodeURIComponent(id) + '/approve', {method: 'POST'});
+      const payload = await res.json();
+      if(!payload.ok){ toast('warn', 'Approve failed: ' + (payload.error || 'unknown error')); return; }
+      d.review = 'approved';
+      const pool = INVOICE_PIPELINE.rally;
+      for(const inv of payload.invoices){
+        const idx = pool.findIndex(x=>x.id===inv.id);
+        if(idx >= 0) pool[idx] = inv; else pool.unshift(inv);
+      }
+      const invs = payload.invoices;
+      const first = invs[0];
+      if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+        AUDIT.unshift({
+          ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
+          ev: 'invoice_drafted', ent: 'invoice', actor: 'Alex Rivera',
+          target: first.id, rationale: 'Approved ' + d.id + ' · ' + (invs.length > 1
+            ? invs.length + ' recurring (' + d.invoicingSchedule + ') invoices autofilled from extracted contract terms'
+            : 'invoice autofilled from extracted contract terms'),
+          before: {dealId: d.id, review: dealReviewBefore},
+          after: {dealId: d.id, review: d.review, invoiceIds: invs.map(x=>x.id)}
+        });
+      }
+      if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
+      renderPipeline();
+      renderInvoicePipeline();
+      if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+      if(typeof renderSchedule === 'function') renderSchedule();
+      if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
+      if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
+      if(typeof applyRealIncidents === 'function') applyRealIncidents();
+      const msg = invs.length > 1
+        ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
+        : `Approved · ${first.id} created from contract, staged in Draft`;
+      toast('success', msg);
+    }catch(e){
+      toast('warn', 'Could not reach the server — is server.py running? (' + e.message + ')');
     }
-    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
-    renderPipeline();
-    renderInvoicePipeline();
-    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
-    if(typeof renderSchedule === 'function') renderSchedule();
-    if(typeof REAL_COMPUTED_AT !== 'undefined') REAL_COMPUTED_AT.invoicing = Date.now() / 1000;
-    if(typeof applyRealAgentCards === 'function') applyRealAgentCards();
-    if(typeof applyRealIncidents === 'function') applyRealIncidents();
-    const msg = invs.length > 1
-      ? `Approved · ${invs.length} recurring invoices created (${first.id} … ${invs[invs.length-1].id}), staged in Draft`
-      : `Approved · ${first.id} created from contract, staged in Draft`;
-    toast('success', msg);
     return;
   }
+  d.review = 'approved';
   const sched = (typeof HALCYON_SCHEDULE !== 'undefined' && HALCYON_SCHEDULE[d.id]) || [];
   const n = d.progressive ? (sched.length || 5) : 1;
   renderPipeline();
@@ -2545,7 +2507,7 @@ function renderCash(view){
       <th>QB payment</th><th>Customer</th><th class="num">Amount</th><th>Applied to</th><th class="num">Confidence</th><th>When</th><th style="text-align:right">Actions</th>
     </tr></thead><tbody>${CASH_MATCHED.map(p=>{
       const overTag = p.over ? ` <span class="pill amber dot" style="margin-left:6px">overpayment +${money(p.over)}</span>` : '';
-      const overAction = p.over ? `<button class="csv-btn" onclick="event.stopPropagation();openCreditNoteModal({customer:'${esc(p.c).replace(/'/g,"\\'")}',inv:'${p.inv}',amt:'${money(p.over)}'})">Issue credit note</button>` : '';
+      const overAction = p.over ? `<button class="csv-btn" onclick="event.stopPropagation();openCreditNoteModal({customer:'${esc(p.c).replace(/'/g,"\\'")}',inv:'${p.inv}',amt:'${money(p.over)}',real:${p.real?'true':'false'},paymentId:'${esc(p.qb)}'})">${p.creditNote ? 'Credit note issued' : 'Issue credit note'}</button>` : '';
       return `<tr onclick="openPaymentDrawer('matched','${p.qb}')">
         <td class="mono">${p.qb}</td><td>${p.c}${liveTag(p)}${overTag}</td><td class="amt-cell green">${money(p.amt)}</td>
         <td class="mono">${p.inv}</td><td class="num">${p.conf.toFixed(2)}</td><td style="color:var(--text-3)">${p.when}</td>
@@ -2687,7 +2649,7 @@ function getInvoicePipeline(){
   if(currentClient==='all')     return INVOICE_PIPELINE.rally.filter(i=>i.real).concat(INVOICE_PIPELINE.trade, INVOICE_PIPELINE.halcyon);
   // Real invoices only, same as Deal Pipeline/Cash Application/Collections
   // -- INVOICE_PIPELINE.rally still carries its original demo cards
-  // underneath the real ones createOrUpdateInvoiceFromDeal() unshifts in,
+  // underneath the real ones loadRealInvoices()/approveDeal() unshift in,
   // but the Invoice Pipeline board should only ever reflect invoices
   // drafted from a real approved HubSpot deal, not this page's own
   // pre-existing demo cards.
@@ -2786,9 +2748,9 @@ function openInvoicePipelineDrawer(id){
     : (inv.real
         // A recurring multi-period invoice (seriesCount > 1) genuinely did
         // have real line items extracted from the contract -- they just
-        // aren't apportioned per period (createOrUpdateInvoiceFromDeal()
-        // splits the total evenly instead of guessing which line item
-        // belongs to which installment). "Not extracted" would be a lie
+        // aren't apportioned per period (_build_invoices_for_deal() in
+        // server.py splits the total evenly instead of guessing which line
+        // item belongs to which installment). "Not extracted" would be a lie
         // here; reuse the already-correct milestone text instead (e.g.
         // "Recurring monthly invoice 18 of 18"), which is only genuinely
         // true for a real single-shot invoice where no pricing table
@@ -2934,9 +2896,15 @@ function renderAudit(){
   const tb = document.querySelector('#tbl-audit tbody');
   tb.innerHTML = rows.map((a,i)=>{
     const actClass = a.actor==='Emma'?'purple':(a.actor==='system'?'slate':'blue');
+    // Same signal expandAudit() already relies on -- only the 4 real
+    // mutation sites (approveDeal/sendRealInvoiceEmail/saveDealEdits/
+    // snoozeScheduledInvoice) ever set before/after, so this never
+    // misfires on the ~30 fabricated demo rows.
+    const isReal = a.before !== undefined || a.after !== undefined;
+    const liveTag = isReal ? ' <span class="pill green dot" style="font-size:9px;margin-left:4px">Live</span>' : '';
     return `<tr onclick="expandAudit(this,${i})">
       <td class="mono" style="font-size:11px">${a.ts}</td>
-      <td class="mono">${a.ev}</td>
+      <td class="mono">${a.ev}${liveTag}</td>
       <td><span class="pill slate">${a.ent}</span></td>
       <td><span class="pill ${actClass}">${a.actor}</span></td>
       <td class="mono">${a.target}</td>
@@ -2957,7 +2925,8 @@ function expandAudit(row,i){
   const afterLabel = hasReal ? 'After (real)' : 'After snapshot (illustrative)';
   const before = JSON.stringify(hasReal ? (a.before ?? {}) : {status:'previous',ts:a.ts.slice(0,10),target:a.target}, null, 2);
   const after  = JSON.stringify(hasReal ? (a.after ?? {})  : {status:a.ev,ts:a.ts,target:a.target,actor:a.actor,rationale:a.rationale}, null, 2);
-  openDrawer('Audit event · '+a.ev, `${a.actor} · ${a.target} · ${a.ts}`, `
+  const liveTag = hasReal ? ' <span class="pill green dot" style="font-size:9px;margin-left:4px">Live</span>' : '';
+  openDrawer('Audit event · '+a.ev, `${a.actor} · ${a.target} · ${a.ts}${liveTag}`, `
     <div class="dsec"><h4>${beforeLabel}</h4><div class="jsonbox">${before}</div></div>
     <div class="dsec"><h4>${afterLabel}</h4><div class="jsonbox">${after}</div></div>
     <div class="dsec"><h4>Context</h4><div style="font-size:12.5px;color:var(--text-2)">${a.rationale}</div></div>
@@ -3311,7 +3280,7 @@ function openDealDrawer(id, editMode){
     </div>
   `;
   const approveFooter = isAwaiting
-    ? `<button class="btn primary" onclick="approveDeal('${d.id}');closeDrawer()">Approve deal</button>`
+    ? `<button class="btn primary" onclick="requestApproveDeal('${d.id}')">Approve deal</button>`
     : '';
   const footHTML = editMode
     ? `<button class="btn" onclick="cancelDealEdits('${d.id}')">Cancel</button>
@@ -3791,7 +3760,10 @@ function suggestedReplyForIncident(i){
     return "Hi "+who+",\n\nExtraction on the contract for "+i.c+" came back at "+confN+" confidence, below our 0.85 threshold. Please review the parsed fields before we proceed.\n\nEmma";
   }
   if(i.type==='invoice_delivery_failed') return "Hi "+i.c+" team,\n\nOur last delivery of "+i.inv+" bounced. Could you confirm the current AP inbox so we can resend?\n\nEmma";
-  if(i.type==='payment_overpaid') return "Hi "+i.c+" team,\n\nWe received a payment that came in $200 above the invoice total on "+i.inv+". Would you like the difference credited to the next invoice or refunded?\n\nEmma";
+  if(i.type==='payment_overpaid'){
+    const overAmt = i.real && typeof i.over === 'number' ? money(i.over) : '$200';
+    return "Hi "+i.c+" team,\n\nWe received a payment that came in "+overAmt+" above the invoice total on "+i.inv+". Would you like the difference credited to the next invoice or refunded?\n\nEmma";
+  }
   if(i.type==='invoice_rejected') return "Hi "+i.h+",\n\nRegenerating "+i.inv+" with the corrected line item now. Will resurface for approval shortly.\n\nEmma";
   return "Hi,\n\nFollowing up on incident "+i.id+". Emma has drafted the context above for review.\n\nEmma";
 }
@@ -3842,7 +3814,10 @@ function plainEventDescription(i){
   if(t==='payment_unmatched') return i.real
     ? `QuickBooks received a payment of ${amt} from ${c} with no linked invoice. No automated matching exists yet, so Emma held it for a manual match.`
     : `QuickBooks received a payment of ${amt} that Emma could not confidently match to an open invoice. Match confidence came in below the 0.85 threshold.`;
-  if(t==='payment_overpaid') return `QuickBooks received a payment against ${inv} that came in $200 above the invoice total ($3,200). Waiting on a lead to credit next invoice or refund.`;
+  if(t==='payment_overpaid'){
+    if(i.real && typeof i.over === 'number') return `QuickBooks received a payment of ${amt} against ${inv} that came in ${money(i.over)} above the invoice total (${money(i.amt-i.over)}). Waiting on a lead to credit next invoice or refund.`;
+    return `QuickBooks received a payment against ${inv} that came in $200 above the invoice total ($3,200). Waiting on a lead to credit next invoice or refund.`;
+  }
   if(t==='payment_received') return `QuickBooks confirmed ${amt} received on ${inv} for ${c}. Emma applied it automatically.`;
   if(t==='invoice_delivery_failed') return `Delivery of ${inv} to ${c} bounced (mailbox full). Emma is holding a resend until AP confirms a new inbox.`;
   if(t==='invoice_rejected') return `${c}'s approver rejected ${inv} with the reason: line item 3 quantity wrong. Emma paused sending and is drafting a v2.`;
@@ -3885,9 +3860,15 @@ function emmaPriorActions(i){
       'Suggested the top 3 candidate invoices for a human pick.',
       'Held the payment on the unmatched queue pending decision.'];
   }
-  if(t==='payment_overpaid') return [
-    'Matched the payment to ' + i.inv + ' on memo.',
-    'Flagged the $200 delta for a human decision: credit the next invoice or refund.'];
+  if(t==='payment_overpaid'){
+    if(i.real && typeof i.over === 'number') return [
+      'Matched the payment to ' + i.inv + ' via QuickBooks\' own LinkedTxn.',
+      'Compared the payment amount to the invoice\'s real total -- ' + money(i.over) + ' over.',
+      'Flagged the delta for a human decision: credit the next invoice or refund.'];
+    return [
+      'Matched the payment to ' + i.inv + ' on memo.',
+      'Flagged the $200 delta for a human decision: credit the next invoice or refund.'];
+  }
   if(t==='deal_missing_signed_pdf'){
     if(i.real) return [
       'Detected the closed-won stage change on ' + (i.deal||'the deal') + '.',
@@ -3929,7 +3910,10 @@ function suggestedNextAction(i){
   if(t==='writeoff_candidate') return { text:'Approve writing off ' + money(i.amt) + ' on ' + i.inv + ', or extend the cadence one more cycle before writing off.', action:'Approve writeoff' };
   if(t==='invoice_dispute') return { text:'Reply to ' + i.c + ' AP with a 15 minute call proposal, then adjust the disputed lines once the review completes.', action:'Send call proposal' };
   if(t==='payment_unmatched') return { text:'Pick the correct invoice from the top-3 suggestions, or mark as a prepaid credit for later application.', action:'Apply payment' };
-  if(t==='payment_overpaid') return { text:'Credit the $200 overpayment to the next ' + i.c + ' invoice, or refund the difference to their bank.', action:'Credit next invoice' };
+  if(t==='payment_overpaid'){
+    const overAmt = i.real && typeof i.over === 'number' ? money(i.over) : '$200';
+    return { text:'Credit the ' + overAmt + ' overpayment to the next ' + i.c + ' invoice, or refund the difference to their bank.', action:'Credit next invoice' };
+  }
   if(t==='deal_missing_signed_pdf') return { text:'Attach the signed contract to ' + i.deal + ' — Emma will resume invoice generation automatically.', action:'Request signed contract' };
   if(t==='deal_ambiguous_pdf') return { text:'Pick the source-of-truth PDF, then Emma re-runs extraction with the correct one.', action:'Pick source PDF' };
   if(t==='deal_low_confidence_extraction') return { text:'Review the parsed fields, correct any errors, and resume invoice generation.', action:'Open extraction review' };
@@ -4150,7 +4134,8 @@ function openRealCollectionsDrawer(c){
     </div>
   `;
   openDrawer('Collections · '+c.inv, `${c.c} · DPD ${c.dpd}`, body,
-    `<button class="btn" onclick="closeDrawer()">Close</button>`);
+    `<button class="btn" onclick="closeDrawer()">Close</button>
+     <button class="btn danger" onclick="openWriteoffModal('${c.inv}')">Draft writeoff</button>`);
 }
 
 async function sendRealDunningEmail(collId){
@@ -4270,7 +4255,9 @@ function openIncidentDrawer(id){
     <div class="dsec"><h4>Suggested next action</h4>
       <div style="background:#f4f0ff;border:1px solid var(--purple-mid);border-radius:8px;padding:12px 14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
         <div style="flex:1;min-width:220px;font-size:12.5px;line-height:1.55;color:var(--text)">${esc(next.text)}</div>
-        <button class="btn primary" onclick="toast('success','${esc(next.action)} · '+'${i.id}');closeDrawer()">${esc(next.action)}</button>
+        ${i.type==='payment_overpaid' && i.real
+          ? `<button class="btn primary" onclick="openCreditNoteModal({customer:'${esc(i.c).replace(/'/g,"\\'")}',inv:'${esc(i.inv)}',amt:'${esc(money(i.over))}',real:true,paymentId:'${esc(i.id.replace('INC-REAL-OVERPAY-',''))}'})">${esc(next.action)}</button>`
+          : `<button class="btn primary" onclick="toast('success','${esc(next.action)} · '+'${i.id}');closeDrawer()">${esc(next.action)}</button>`}
       </div>
     </div>
 
@@ -4435,6 +4422,10 @@ function renderReconTiles(){
     </div>
   `;
   const varianceRows = real ? real.varianceRows : RECON_UNMATCHED;
+  // exportReconReport() reads this so the downloaded CSV always matches
+  // whatever's actually on screen -- real rows when real data loaded,
+  // the same demo rows otherwise, never a stale mismatch between the two.
+  CURRENT_RECON_VARIANCE_ROWS = varianceRows;
   const varianceHdr = document.getElementById('reconVarianceHdr');
   if(varianceHdr){
     const total = varianceRows.reduce((s,r)=>s+(Number(r.amt)||0),0);
@@ -4459,32 +4450,69 @@ function renderReconTiles(){
   }
   const trend = document.getElementById('reconTrend');
   if(trend){
-    trend.innerHTML = RECON_TREND.map(d=>{
-      const color = d.s==='green'?'#0d6b2c':d.s==='amber'?'#c8871a':'#c02a2a';
-      const tip = d.v===0 ? d.d+' · reconciled' : d.d+' · variance '+money(d.v);
-      return `<span class="recon-dot" title="${esc(tip)}" style="background:${color}"></span>`;
-    }).join('') + '<span class="recon-trend-lbl">Last 14 days · hover for variance</span>';
+    if(real && REAL_RECON_TREND.length){
+      // Real day-by-day history, recorded by the backend on each genuine
+      // recompute (see _record_recon_trend_snapshot() in server.py) --
+      // tracked:false for any day before this existed, shown as an
+      // honest gap rather than a fabricated zero.
+      const anyUntracked = REAL_RECON_TREND.some(d=>!d.tracked);
+      trend.innerHTML = REAL_RECON_TREND.map(d=>{
+        if(!d.tracked) return `<span class="recon-dot" title="${esc(d.date)} · not tracked yet" style="background:#d9d9dd"></span>`;
+        const color = d.amount === 0 ? '#0d6b2c' : '#c8871a';
+        const tip = d.amount === 0 ? d.date+' · reconciled' : d.date+' · '+money(d.amount)+' unmatched';
+        return `<span class="recon-dot" title="${esc(tip)}" style="background:${color}"></span>`;
+      }).join('') + '<span class="recon-trend-lbl">Last 14 days' + (anyUntracked ? ' · tracking just started, earlier days not recorded yet' : ' · hover for detail') + '</span>';
+    } else {
+      trend.innerHTML = RECON_TREND.map(d=>{
+        const color = d.s==='green'?'#0d6b2c':d.s==='amber'?'#c8871a':'#c02a2a';
+        const tip = d.v===0 ? d.d+' · reconciled' : d.d+' · variance '+money(d.v);
+        return `<span class="recon-dot" title="${esc(tip)}" style="background:${color}"></span>`;
+      }).join('') + '<span class="recon-trend-lbl">Last 14 days · hover for variance</span>';
+    }
   }
 }
 
 function exportReconReport(){
-  const rows = [['ref','customer','amount','reason','note']].concat(RECON_UNMATCHED.map(r=>[r.ref,r.c,r.amt,r.reason,r.note]));
+  const source = CURRENT_RECON_VARIANCE_ROWS.length ? CURRENT_RECON_VARIANCE_ROWS : RECON_UNMATCHED;
+  const rows = [['ref','customer','amount','reason','note']].concat(source.map(r=>[r.ref,r.c,r.amt,r.reason,r.note]));
   const csv = rows.map(r=>r.map(x=>`"${x}"`).join(',')).join('\n');
   const blob = new Blob([csv],{type:'text/csv'});
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href=url; a.download='emma_reconciliation_2026-09-16.csv'; a.click();
-  toast('success','Reconciliation report exported · '+RECON_UNMATCHED.length+' variance rows');
+  const a = document.createElement('a'); a.href=url; a.download='emma_reconciliation_' + new Date().toISOString().slice(0,10) + '.csv'; a.click();
+  toast('success','Reconciliation report exported · '+source.length+' variance rows');
 }
 
 /* =====================================================================
    CREDIT NOTE MODAL · cash application
    ===================================================================== */
+// Set by openCreditNoteModal() whenever it's opened against a real
+// overpayment (Cash Application's per-row button, or the Incidents page's
+// "Credit next invoice" action), read back by submitCreditNote() to decide
+// whether to persist server-side. null for the standalone "+ Issue credit
+// note" button, which only ever offers this page's own mock customer/
+// invoice lists -- nothing real to tie a persisted record to.
+let _creditNoteContext = null;
 function openCreditNoteModal(prefill){
   prefill = prefill || {};
+  _creditNoteContext = prefill.real ? {real: true, paymentId: prefill.paymentId} : null;
   const customers = ['Acme Corp','Bluewave Robotics','Halcyon Group','Sagebrush Media','Stellar Systems','Meridian Industries','NorthPeak Analytics','Catalyst Ventures'];
   const invoices = ['INV-2026-09-1204','INV-2026-09-1203','INV-2026-08-0912','INV-2026-09-1189','INV-2026-08-0899','INV-2026-08-0891','INV-2026-09-1187','INV-2026-09-1201'];
-  const custOpts = customers.map(c=>`<option${prefill.customer===c?' selected':''}>${esc(c)}</option>`).join('');
-  const invOpts  = invoices.map(iv=>`<option${prefill.inv===iv?' selected':''}>${esc(iv)}</option>`).join('');
+  // A real prefill's customer/invoice (live QBO names/doc numbers) won't
+  // match this page's fixed mock lists -- prepend it as its own selected
+  // option instead of silently falling back to whatever option is first.
+  const custList = prefill.customer && !customers.includes(prefill.customer) ? [prefill.customer, ...customers] : customers;
+  const invList = prefill.inv && !invoices.includes(prefill.inv) ? [prefill.inv, ...invoices] : invoices;
+  const custOpts = custList.map(c=>`<option${prefill.customer===c?' selected':''}>${esc(c)}</option>`).join('');
+  const invOpts  = invList.map(iv=>`<option${prefill.inv===iv?' selected':''}>${esc(iv)}</option>`).join('');
+  // Looked up live rather than threaded through the onclick string -- a
+  // JSON-ified object there would carry double quotes that break out of
+  // the attribute's own quoting.
+  const existingNote = prefill.real
+    ? (CASH_MATCHED.find(x=>x.qb===prefill.paymentId) || {}).creditNote
+    : null;
+  const alreadyIssued = existingNote ? `<div class="dsec"><h4>Already issued</h4>
+      <div style="font-size:12.5px;color:var(--text-2);line-height:1.5">${esc(existingNote.amount)} · ${esc(existingNote.reason)} · ${existingNote.application==='refund'?'refund routed to AP':'applied to next invoice'} on ${esc(existingNote.requestedAt.slice(0,10))} · <span class="pill amber dot">${esc(existingNote.status)}</span></div>
+    </div>` : '';
   const body = `
     <div class="dg">
       <div class="dfield"><div class="l">Customer</div><div class="v"><select id="cnCust" class="f">${custOpts}</select></div></div>
@@ -4505,16 +4533,44 @@ function openCreditNoteModal(prefill){
     <div class="dsec"><h4>What Emma will do</h4>
       <div style="font-size:12.5px;color:var(--text-2);line-height:1.5">Emma will generate a credit note (CN-2026-xxxx), attach it to the related invoice, and either apply it to the next scheduled invoice for that customer or route a refund request to accounts payable. The credit note lands in the audit trail immediately.</div>
     </div>
+    ${alreadyIssued}
   `;
   openDrawer('Issue credit note', 'Cash application · manual credit', body,
     `<button class="btn" onclick="closeDrawer()">Cancel</button>
      <button class="btn primary" onclick="submitCreditNote()">Issue credit note</button>`);
 }
-function submitCreditNote(){
+async function submitCreditNote(){
   const cust = document.getElementById('cnCust').value;
   const inv  = document.getElementById('cnInv').value;
   const amt  = document.getElementById('cnAmt').value;
+  const reason = document.getElementById('cnReason').value;
   const apply = document.getElementById('cnApply').value;
+  const ctx = _creditNoteContext;
+  if(ctx && ctx.real){
+    try{
+      const res = await fetch('/api/cash/' + encodeURIComponent(ctx.paymentId) + '/credit-note', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({customer: cust, inv, amount: amt, reason, application: apply})
+      });
+      const payload = await res.json();
+      if(!payload.ok){ toast('warn', 'Credit note failed: ' + (payload.error || 'unknown error')); return; }
+      const row = CASH_MATCHED.find(x=>x.qb===ctx.paymentId);
+      if(row) row.creditNote = payload.creditNote;
+      const inc = REAL_INCIDENTS.find(x=>x.id==='INC-REAL-OVERPAY-'+ctx.paymentId);
+      if(inc) inc.creditNote = payload.creditNote;
+      if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+        AUDIT.unshift({
+          ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
+          ev: 'credit_note_issued', ent: 'invoice', actor: 'Alex Rivera',
+          target: inv, rationale: reason + ' · ' + (apply==='refund' ? 'refund routed to AP' : 'applied to next invoice'),
+          before: {creditNote: null}, after: {creditNote: payload.creditNote}
+        });
+      }
+    }catch(e){
+      toast('warn', 'Could not reach the server — is server.py running? (' + e.message + ')');
+      return;
+    }
+  }
   closeDrawer();
   const suffix = apply==='refund' ? ' · refund routed to AP' : ' · applied to next invoice';
   toast('success','Credit note issued for '+cust+' · '+amt+' against '+inv+suffix);
@@ -4574,13 +4630,42 @@ function openWriteoffModal(inv){
     <div class="dsec"><h4>Effect</h4>
       <div style="font-size:12.5px;color:var(--text-2);line-height:1.5">On approval, ${esc(invRef)} moves to Written off, cadence stops permanently, and the balance is journaled to the selected GL account. The customer's account is flagged for a credit-check review before any new deals.</div>
     </div>
+    ${c && c.writeoff ? `<div class="dsec"><h4>Already requested</h4>
+      <div style="font-size:12.5px;color:var(--text-2);line-height:1.5">${esc(c.writeoff.amount)} · ${esc(c.writeoff.reason)} · routed to ${esc(c.writeoff.approver)} on ${esc(c.writeoff.requestedAt.slice(0,10))} · <span class="pill amber dot">${esc(c.writeoff.status)}</span></div>
+    </div>` : ''}
   `;
   openDrawer('Writeoff request · '+invRef, `${customer} · DPD ${dpd}`, body,
     `<button class="btn" onclick="closeDrawer()">Cancel</button>
-     <button class="btn danger" onclick="submitWriteoff('${esc(invRef)}')">Submit for approval</button>`);
+     <button class="btn danger" onclick="submitWriteoff('${esc(invRef)}','${c ? esc(c.id) : ''}')">Submit for approval</button>`);
 }
-function submitWriteoff(inv){
+async function submitWriteoff(inv, collId){
   const approver = document.getElementById('woApprover').value.split(' · ')[0];
+  const amount = document.getElementById('woAmt').value;
+  const reason = document.getElementById('woReason').value;
+  const glAccount = document.getElementById('woGl').value;
+  const c = collId ? getCollections().find(x=>x.id===collId) : null;
+  if(c && c.real){
+    try{
+      const res = await fetch('/api/collections/' + encodeURIComponent(collId) + '/writeoff', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({amount, reason, approver, glAccount})
+      });
+      const payload = await res.json();
+      if(!payload.ok){ toast('warn', 'Writeoff failed: ' + (payload.error || 'unknown error')); return; }
+      c.writeoff = payload.writeoff;
+      if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
+        AUDIT.unshift({
+          ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
+          ev: 'writeoff_requested', ent: 'invoice', actor: 'Alex Rivera',
+          target: inv, rationale: reason + ' · routed to ' + approver,
+          before: {writeoff: null}, after: {writeoff: payload.writeoff}
+        });
+      }
+    }catch(e){
+      toast('warn', 'Could not reach the server — is server.py running? (' + e.message + ')');
+      return;
+    }
+  }
   closeDrawer();
   toast('success','Writeoff request submitted to '+approver+' · '+inv);
 }
@@ -5176,6 +5261,13 @@ function applyRealCashToInvoices(){
     const before = {stage: target.stage};
     target.stage = 'paid';
     target.paidVia = 'QBO payment ' + (p.qb || '—') + (p.when ? ' · ' + p.when : '');
+    // Persist so this survives a reload and is visible to a second
+    // browser/user -- target.id only exists server-side once it was
+    // created by a real approval, so this is a no-op for anything else.
+    fetch('/api/invoices/' + encodeURIComponent(target.id) + '/mark-paid', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paidVia: target.paidVia})
+    }).catch(()=>{});
     if(typeof AUDIT !== 'undefined' && Array.isArray(AUDIT)){
       AUDIT.unshift({
         ts: (typeof _realNowStamp === 'function' ? _realNowStamp() : new Date().toISOString()),
@@ -5222,6 +5314,20 @@ function applyRealIncidents(){
       age: _compactAge(REAL_COMPUTED_AT.cash),
       src: 'QuickBooks payment event', amt: c.amt, inv: '—', deal: '—',
       real: true, conf: typeof c.conf === 'number' ? c.conf : 0
+    });
+  }
+
+  // Real QuickBooks payments that paid more than their single linked
+  // invoice's TotalAmt -- over is computed server-side from QBO's own
+  // authoritative numbers (compute_cash() in server.py), never guessed.
+  // Only ever set when a payment links to exactly one invoice.
+  for(const p of CASH_MATCHED.filter(x=>x.real && x.over)){
+    rows.push({
+      id: 'INC-REAL-OVERPAY-' + p.qb, type: 'payment_overpaid',
+      c: p.c, st: 'held_for_review', h: 'Emma',
+      age: _compactAge(REAL_COMPUTED_AT.cash),
+      src: 'QB payment ' + money(p.amt) + ' · invoice ' + p.inv,
+      amt: p.amt, inv: p.inv, deal: '—', real: true, over: p.over
     });
   }
 
@@ -5429,7 +5535,7 @@ let schStatus = 'all';
 let schSortDir = 1; // 1 ASC, -1 DESC by dueDate
 
 // Real invoices are only ever created once a human approves the deal in
-// Deal Pipeline (createOrUpdateInvoiceFromDeal) -- there is no real "not
+// Deal Pipeline (POST /api/deals/<id>/approve) -- there is no real "not
 // yet drafted" state to schedule ahead of time, so this maps each real,
 // unpaid invoice (possibly a future installment of a recurring series)
 // straight onto the row shape this page already renders.
@@ -5950,6 +6056,33 @@ async function loadRealCollections(refresh){
   }
 }
 
+// Real invoices are now durable server-side (POST /api/deals/<id>/approve
+// creates them, /api/invoices/<id>/mark-sent and mark-paid update them) --
+// this hydrates INVOICE_PIPELINE.rally with that persisted state on page
+// load, which is what makes an approval/invoice survive a reload and show
+// up for a second browser/user instead of only existing in the approving
+// tab's memory.
+async function loadRealInvoices(){
+  try{
+    const res = await fetch('/api/invoices');
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const payload = await res.json();
+    const list = payload.invoices || [];
+    const pool = INVOICE_PIPELINE.rally;
+    for(const inv of list){
+      const idx = pool.findIndex(x=>x.id===inv.id);
+      if(idx >= 0) pool[idx] = inv; else pool.unshift(inv);
+    }
+    renderInvoicePipeline();
+    if(typeof applyRealScheduledInvoices === 'function') applyRealScheduledInvoices();
+    if(typeof renderSchedule === 'function') renderSchedule();
+    if(typeof applyRealCashToInvoices === 'function') applyRealCashToInvoices();
+    if(typeof applyRealIncidents === 'function') applyRealIncidents();
+  }catch(e){
+    toast('warn', 'Could not reach the live invoices API — is server.py running? (' + e.message + ')');
+  }
+}
+
 async function refreshRealCollections(){
   const btn = document.getElementById('btnRefreshCollections');
   if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
@@ -6035,6 +6168,7 @@ async function loadRealDealReconciliation(refresh){
     }
     renderDealReconciliation(rows);
     DEAL_RECON = rows;
+    REAL_RECON_TREND = payload.trend || [];
     if(typeof renderReconTiles === 'function') renderReconTiles();
     if(typeof applyRealOverviewCollectionKpis === 'function') applyRealOverviewCollectionKpis();
     if(typeof applyRealMorningBrief === 'function') applyRealMorningBrief();
@@ -6129,6 +6263,7 @@ updateTopDateStamp();
 setInterval(updateTopDateStamp, 1000);
 
 loadRealDeals(false);
+loadRealInvoices();
 loadRealCash(false);
 loadRealCollections(false);
 loadRealDealReconciliation(false);
